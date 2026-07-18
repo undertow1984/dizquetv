@@ -5,12 +5,12 @@ module.exports = {
     TVGUIDE_MAXIMUM_FLEX_DURATION : 6 * 60 * 60 * 1000,
     TOO_FREQUENT: 1000,
 
-    // Duration of things like the loading screen and the interlude (the black
-    // frame that appears between videos). The goal of these things is to
-    // prevent the video from getting stuck on the last second, which looks bad
-    // for some reason ~750 works well. I raised the fps to 60 and now 420 works
-    // but I wish it was lower.
+    // Duration of the interlude (black frame between videos). Kept short so
+    // episode transitions stay snappy. ~420ms at 60fps.
     GAP_DURATION: 10*42,
+
+    // Safety ceiling only — actual loading ends when prewarm is ready (dynamic).
+    LOADING_SCREEN_MAX_MS: 45 * 1000,
 
     //when a channel is forcibly stopped due to an update, let's mark it as active
     // for a while during the transaction just in case.

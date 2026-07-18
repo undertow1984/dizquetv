@@ -7,6 +7,7 @@ const fs = require('fs')
 const ProgramPlayer = require('./program-player');
 const channelCache  = require('./channel-cache')
 const wereThereTooManyAttempts = require('./throttler');
+const streamPrewarm = require('./stream-prewarm');
 
 module.exports = { router: video, shutdown: shutdown }
 
@@ -173,8 +174,85 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
         }
 
         let isBetween = ( (typeof req.query.between !== 'undefined') && (req.query.between=='1') );
+        let isPrewarmProducer = (req.query.prewarmProducer === '1');
 
-        let ffmpegSettings = db['ffmpeg-settings'].find()[0]
+        let ffmpegSettings = Object.assign({}, db['ffmpeg-settings'].find()[0]);
+
+        // Disable Preludes: no loading splash, no black-frame gaps
+        if (ffmpegSettings.disablePreludes === true) {
+            isBetween = false;
+            if (isLoading) {
+                // first=0 must not show the splash — play the real first program
+                isLoading = false;
+                isFirst = true;
+            }
+        }
+
+        // If this is the real first program and a prewarm is already encoding it,
+        // attach to that stream instead of cold-starting a second encode.
+        if (
+            !isLoading
+            && !isBetween
+            && !isPrewarmProducer
+            && isFirst
+            && !isNaN(session)
+            && streamPrewarm.hasPrewarm(session, number)
+        ) {
+            if (!res.headersSent) {
+                res.writeHead(200, { 'Content-Type': 'video/mp2t' });
+            }
+            if (streamPrewarm.tryServePrewarm(session, number, res)) {
+                console.log(`/stream serving prewarmed first program session=${session} channel=${number}`);
+                return;
+            }
+        }
+
+        // Stream mode must NOT leak from global settings onto internal concat segments.
+        // HDHR / Plex Live TV uses /video → playlist → /stream (no mode query). Those
+        // must stay classic MPEG-TS or the continuous live pipe breaks (stuck on Loading).
+        // Only apply remux/HLS mode when the request explicitly opts in.
+        let explicitMode = (req.query.streamMode || '').toString().toLowerCase();
+        let explicitRemux = (req.query.remux === '1');
+        let isHlsPlaylistSegment = (m3u8 === true);
+        let streamMode = 'mpegts';
+        let remuxOnly = false;
+
+        if (explicitMode) {
+            streamMode = explicitMode;
+        } else if (isHlsPlaylistSegment) {
+            // Segment requested via /m3u8 playlist: use global mode if it is an HLS family mode
+            let globalMode = (ffmpegSettings.streamMode || 'mpegts').toString().toLowerCase();
+            if (globalMode === 'hls' || globalMode === 'hls_slower' || globalMode === 'hls_direct_v2') {
+                streamMode = globalMode;
+            } else if (globalMode === 'hls_direct') {
+                // hls-direct has its own endpoint; treat m3u8 hits as plain hls
+                streamMode = 'hls';
+            } else {
+                streamMode = 'hls';
+            }
+        } else {
+            // Internal concat (/video playlist children): always classic
+            streamMode = 'mpegts';
+        }
+
+        remuxOnly = explicitRemux
+            || streamMode === 'hls_direct'
+            || streamMode === 'hls_direct_v2';
+
+        // Loading / offline / interlude placeholders must never remux-only (needs generate+encode)
+        if (isLoading || isBetween) {
+            remuxOnly = false;
+        }
+
+        // Concat pipeline and HDHR always need MPEG-TS segments
+        if (!isHlsPlaylistSegment && !explicitRemux && !explicitMode) {
+            remuxOnly = false;
+            streamMode = 'mpegts';
+            ffmpegSettings.outputFormat = 'mpegts';
+            delete ffmpegSettings.remuxOnly;
+        }
+
+        console.log(`/stream mode=${streamMode} remuxOnly=${remuxOnly} m3u8=${m3u8} loading=${isLoading}`);
 
         // Check if ffmpeg path is valid
         if (!fs.existsSync(ffmpegSettings.ffmpegPath)) {
@@ -183,8 +261,8 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
             return
         }
 
-        if (ffmpegSettings.disablePreludes === true) {
-            //disable the preludes
+        // remux / direct modes: no black-screen preludes
+        if (remuxOnly) {
             isBetween = false;
         }
 
@@ -199,16 +277,38 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
       let upperBounds = [];
 
       const GAP_DURATION = constants.GAP_DURATION;
+      // Loading duration is DYNAMIC: splash runs until prewarm has enough data
+      // (see stream-prewarm.waitUntilReady). streamDuration is only a safety max.
+      let loadingMaxMs = 45 * 1000;
+
       if (isLoading) {
+          // Start encoding the first real program BEFORE the splash so readiness is dynamic
+          if (!isNaN(session) && !isPrewarmProducer) {
+              streamPrewarm.startPrewarm(
+                  session,
+                  number,
+                  process.env.PORT,
+                  audioOnly
+              );
+          }
           lineupItem = {
              type: 'loading',
              title: "Loading Screen",
-             noRealTime: true,
-             streamDuration: GAP_DURATION,
-             duration: GAP_DURATION,
+             noRealTime: false,
+             streamDuration: loadingMaxMs,
+             duration: loadingMaxMs,
              redirectChannels: [channel],
              start: 0,
+             // OfflinePlayer ends this segment as soon as prewarm is ready
+             waitForPrewarm: {
+                 session: session,
+                 channel: number,
+                 minBytes: streamPrewarm.DEFAULT_READY_MIN_BYTES,
+                 maxWaitMs: loadingMaxMs,
+                 minSplashMs: 600,
+             },
           };
+          console.log(`/stream loading (dynamic until prewarm ready, max ${loadingMaxMs}ms) session=${session}`);
       } else if (isBetween) {
         lineupItem = {
             type: 'interlude',
@@ -381,6 +481,8 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
             db: db,
             m3u8: m3u8,
             audioOnly : audioOnly,
+            streamMode: streamMode || ffmpegSettings.streamMode || 'mpegts',
+            remuxOnly: remuxOnly,
         }
         
         let player = new ProgramPlayer(playerContext);
@@ -394,8 +496,15 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
             }
         };
         var playerObj = null;
+        let contentType = 'video/mp2t';
+        let outContainer = (ffmpegSettings.hlsDirectContainer || 'mpegts').toString().toLowerCase();
+        if (remuxOnly && outContainer === 'mkv') {
+            contentType = 'video/x-matroska';
+        } else if (remuxOnly && outContainer === 'mp4') {
+            contentType = 'video/mp4';
+        }
         res.writeHead(200, {
-            'Content-Type': 'video/mp2t'
+            'Content-Type': contentType
         });
 
         shieldActiveChannels(redirectChannels, t0, constants.START_CHANNEL_GRACE_PERIOD);
@@ -527,29 +636,88 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
 
         var data = "#EXTM3U\n"
 
+        // EVENT (not VOD) — this is a live channel, not a finite VOD asset
         data += `#EXT-X-VERSION:3
-        #EXT-X-MEDIA-SEQUENCE:0
-        #EXT-X-ALLOW-CACHE:YES
-        #EXT-X-TARGETDURATION:60
-        #EXT-X-PLAYLIST-TYPE:VOD\n`;
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-ALLOW-CACHE:YES
+#EXT-X-TARGETDURATION:60
+#EXT-X-PLAYLIST-TYPE:EVENT\n`;
 
         let ffmpegSettings = db['ffmpeg-settings'].find()[0]
-
-        cur ="59.0";
-
-        if ( ffmpegSettings.enableFFMPEGTranscoding === true) {
-            //data += `#EXTINF:${cur},\n`;
-            data += `${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&first=0&m3u8=1&session=${sessionId}\n`;
+        let streamMode = (req.query.streamMode || ffmpegSettings.streamMode || 'hls').toString().toLowerCase();
+        if (streamMode === 'mpegts' || streamMode === 'hls_direct') {
+            // /m3u8 endpoint is HLS; map legacy/misconfigured modes sensibly
+            streamMode = (streamMode === 'hls_direct') ? 'hls' : 'hls';
         }
-        //data += `#EXTINF:${cur},\n`;
-        data += `${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&first=1&m3u8=1&session=${sessionId}\n`
+        let modeQ = '';
+        if (streamMode === 'hls_slower') {
+            modeQ = '&streamMode=hls_slower';
+        } else if (streamMode === 'hls_direct_v2') {
+            modeQ = '&streamMode=hls_direct_v2&remux=1';
+        } else {
+            modeQ = '&streamMode=hls';
+        }
+
+        // HLS requires #EXTINF before each segment URL
+        let pushSeg = (url) => {
+            data += `#EXTINF:60.0,\n${url}\n`;
+        };
+
+        // Loading splash is a prelude — skip when Disable Preludes is on
+        if (
+            ffmpegSettings.enableFFMPEGTranscoding === true
+            && streamMode !== 'hls_direct_v2'
+            && ffmpegSettings.disablePreludes !== true
+        ) {
+            pushSeg(`${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&first=0&m3u8=1&session=${sessionId}${modeQ}`);
+        }
+        pushSeg(`${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&first=1&m3u8=1&session=${sessionId}${modeQ}`);
         for (var i = 0; i < maxStreamsToPlayInARow - 1; i++) {
-            //data += `#EXTINF:${cur},\n`;
-            data += `${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&m3u8=1&session=${sessionId}\n`
+            pushSeg(`${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&m3u8=1&session=${sessionId}${modeQ}`);
         }
 
         res.send(data)
     })
+
+    /**
+     * HLS Direct (Tunarr-style): single-item playlist pointing at the current program
+     * remuxed with minimal processing. Clients must re-fetch the playlist between programs.
+     */
+    router.get('/hls-direct', async (req, res) => {
+        if (stopPlayback) {
+            res.status(503).send("Server is shutting down.");
+            return;
+        }
+        if (typeof req.query.channel === 'undefined') {
+            res.status(500).send("No Channel Specified");
+            return;
+        }
+        let channelNum = parseInt(req.query.channel, 10);
+        let channel = await channelService.getChannel(channelNum);
+        if (channel == null) {
+            res.status(500).send("Channel doesn't exist");
+            return;
+        }
+
+        let now = new Date().getTime();
+        let durSec = 60;
+        try {
+            let pe = helperFuncs.getCurrentProgramAndTimeElapsed(now, channel);
+            if (pe && pe.program && pe.program.duration) {
+                let remaining = Math.max(5, Math.floor((pe.program.duration - (pe.timeElapsed || 0)) / 1000));
+                durSec = Math.min(3600 * 6, remaining);
+            }
+        } catch (e) {
+            console.error("hls-direct duration estimate failed", e);
+        }
+
+        let sessionId = StreamCount++;
+        res.type("application/x-mpegURL");
+        let data = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${durSec}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n`;
+        data += `#EXTINF:${durSec}.0,\n`;
+        data += `${req.protocol}://${req.get('host')}/stream?channel=${channelNum}&remux=1&streamMode=hls_direct&session=${sessionId}\n`;
+        res.send(data);
+    });
     router.get('/playlist', async (req, res) => {
         if (stopPlayback) {
             res.status(503).send("Server is shutting down.")
@@ -593,8 +761,12 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
             && (ffmpegSettings.normalizeResolution === true)
             && (ffmpegSettings.normalizeAudio === true);
 
+        // Loading splash + black-frame gaps are both "preludes"
+        let preludesEnabled = (ffmpegSettings.disablePreludes !== true);
+
         if (
                transcodingEnabled
+            && preludesEnabled
             && (audioOnly !== true) /* loading screen is pointless in audio mode (also for some reason it makes it fail when codec is aac, and I can't figure out why) */
             && (stepNumber == 0)
         ) {
@@ -605,7 +777,7 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
         if (stepNumber == 0) {
             data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&first=1&session=${sessionId}&audioOnly=${audioOnly}'\n`
 
-            if (transcodingEnabled && (audioOnly !== true)) {
+            if (transcodingEnabled && preludesEnabled && (audioOnly !== true)) {
                 data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&between=1&session=${sessionId}&audioOnly=${audioOnly}'\n`;
             }
             remaining--;
@@ -613,7 +785,7 @@ function video( channelService, fillerDB, db, programmingService, activeChannelS
 
         for (var i = 0; i < remaining; i++) {
             data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&session=${sessionId}&audioOnly=${audioOnly}'\n`
-            if (transcodingEnabled && (audioOnly !== true) ) {
+            if (transcodingEnabled && preludesEnabled && (audioOnly !== true) ) {
                 data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&between=1&session=${sessionId}&audioOnly=${audioOnly}'\n`
             }
         }

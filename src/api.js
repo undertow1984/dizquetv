@@ -307,6 +307,7 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
                 icon: channel.icon,
                 name: channel.name,
                 stealth: channel.stealth,
+                contentSources: channel.contentSources || [],
             });
         } else {
             return res.status(404).send("Channel not found");
@@ -356,6 +357,35 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
       }
     })
 
+    // Enable channel watermark checkbox on all existing channels
+    router.post('/api/channels/enable-watermarks', async (req, res) => {
+      try {
+        let channels = await channelService.getAllChannels();
+        let updated = 0;
+        for (let i = 0; i < channels.length; i++) {
+          let channel = channels[i];
+          if (typeof(channel.watermark) === 'undefined' || channel.watermark == null || typeof(channel.watermark) !== 'object') {
+            channel.watermark = {
+              enabled: true,
+              position: "bottom-right",
+              width: 10.00,
+              verticalMargin: 0.00,
+              horizontalMargin: 0.00,
+              duration: 0,
+            };
+          } else {
+            channel.watermark.enabled = true;
+          }
+          await channelService.saveChannel(channel.number, channel);
+          updated++;
+        }
+        res.send({ updated: updated });
+      } catch(err) {
+        console.error(err);
+        res.status(500).send("error");
+      }
+    })
+
     router.post('/api/upload/image', async (req, res) => {
       try {
         if(!req.files) {
@@ -382,6 +412,61 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
           res.status(500).send(err);
       }
     })
+
+    // Plex library enable/disable settings (which libraries dizqueTV will use)
+    function getPlexLibrarySettingsDoc() {
+      let rows = db['plex-library-settings'].find();
+      if (!rows || rows.length === 0) {
+        let doc = {
+          disabledLibraries: [],
+        };
+        db['plex-library-settings'].save(doc);
+        rows = db['plex-library-settings'].find();
+      }
+      let doc = rows[0];
+      if (!Array.isArray(doc.disabledLibraries)) {
+        doc.disabledLibraries = [];
+      }
+      return doc;
+    }
+
+    router.get('/api/plex-library-settings', (req, res) => {
+      try {
+        let doc = getPlexLibrarySettingsDoc();
+        res.send({
+          disabledLibraries: doc.disabledLibraries || [],
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+      }
+    });
+
+    router.put('/api/plex-library-settings', (req, res) => {
+      try {
+        let doc = getPlexLibrarySettingsDoc();
+        let disabled = req.body && req.body.disabledLibraries;
+        if (!Array.isArray(disabled)) {
+          return res.status(400).send("disabledLibraries must be an array");
+        }
+        // Normalize entries
+        doc.disabledLibraries = disabled.map((d) => {
+          return {
+            serverName: String(d.serverName || ""),
+            sectionKey: String(d.sectionKey || ""),
+            title: d.title ? String(d.title) : undefined,
+            type: d.type ? String(d.type) : undefined,
+          };
+        }).filter((d) => d.serverName && d.sectionKey);
+        db['plex-library-settings'].update({ _id: doc._id }, doc);
+        res.send({
+          disabledLibraries: doc.disabledLibraries,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+      }
+    });
 
     // Filler
     router.get('/api/fillers', async (req, res) => {
@@ -543,6 +628,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         if (typeof(err) !== 'undefined') {
           return res.status(400).send(err);
         }
+        // Stream mode affects M3U channel URLs
+        if (m3uService && typeof m3uService.clearCache === 'function') {
+          m3uService.clearCache();
+        }
         eventService.push(
           "settings-update",
           {
@@ -576,6 +665,9 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     router.post('/api/ffmpeg-settings', (req, res) => { // RESET
       try {
         let ffmpeg = ffmpegSettingsService.reset();
+        if (m3uService && typeof m3uService.clearCache === 'function') {
+          m3uService.clearCache();
+        }
 
         eventService.push(
           "settings-update",
@@ -954,7 +1046,11 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     // XMLTV.XML Download
     router.get('/api/xmltv.xml', async (req, res) => {
       try {
-        const host = `${req.protocol}://${req.get('host')}`;
+        // Prefer forwarded host when behind reverse proxy (helps HTTPS logo URLs for TV clients)
+        const xfProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
+        const protocol = xfProto || req.protocol;
+        const hostHeader = req.get('x-forwarded-host') || req.get('host');
+        const host = `${protocol}://${hostHeader}`;
 
         res.set('Cache-Control', 'no-store')
         res.type('application/xml');
@@ -962,7 +1058,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
 
         let xmltvSettings = db['xmltv-settings'].find()[0];
         const fileContent = await fs.readFileSync(xmltvSettings.file, 'utf8');
-        const fileFinal = fileContent.replace(/\{\{host\}\}/g, host);
+        // Replace {{host}} and rewrite leftover localhost / private-LAN asset URLs
+        // so Google TV / Plex apps can fetch channel logos (web often worked anyway).
+        const { rewriteXmltvIconHosts } = require('./icon-url');
+        const fileFinal = rewriteXmltvIconHosts(fileContent, host);
         res.send(fileFinal);
       } catch(err) {
         console.error(err);
@@ -1005,7 +1104,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
       try {
         res.type('text');
 
-        const host = `${req.protocol}://${req.get('host')}`;
+        const xfProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
+        const protocol = xfProto || req.protocol;
+        const hostHeader = req.get('x-forwarded-host') || req.get('host');
+        const host = `${protocol}://${hostHeader}`;
         const data = await m3uService.getChannelList(host);
 
         res.send(data);

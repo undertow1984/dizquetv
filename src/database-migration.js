@@ -411,6 +411,37 @@ function ffmpeg() {
         maxFPS: 60,
         scalingAlgorithm: "bicubic",
         deinterlaceFilter: "none",
+        disableChannelOverlay: false,
+        enableChannelWatermarkGlobally: false,
+        // Skip loading splash + black interlude frames between programs
+        disablePreludes: false,
+        // Preferred ISO 639 language for audio + subtitle track selection (e.g. eng, spa)
+        preferredLanguage: "eng",
+        // Subtitle delivery for Live TV MPEG-TS:
+        //   off       — no subtitles
+        //   soft      — soft-map image tracks only (PGS/VOBSUB/DVB); no text burn
+        //   soft_burn — soft-map image tracks; extract+burn text (SRT/ASS)
+        subtitleMode: "off",
+        // Legacy boolean kept in sync with subtitleMode !== 'off' for older code paths
+        includeSubtitles: false,
+        // Tone-map HDR (PQ/HLG/DoVi) to SDR when source has HDR metadata
+        enableHdrToneMapping: false,
+        hdrToneMappingAlgorithm: "hable",
+        // FFmpeg encoder speed preset (libx264 names; mapped for NVENC/QSV)
+        // very slow → very fast: veryslow, slower, slow, medium, fast, faster, veryfast, superfast, ultrafast
+        transcodingSpeed: "veryfast",
+        // Hardware decode: none | auto | cuda | qsv | d3d11va | dxva2 | vaapi | videotoolbox
+        // auto picks cuda/qsv/d3d11va/videotoolbox from the video encoder family
+        hardwareDecode: "none",
+        // Optional GPU device (cuda/d3d11 index "0", or vaapi path /dev/dri/renderD128)
+        hardwareDecodeDevice: "",
+        // Extra HW surfaces for CUDA/QSV after decode (default 8)
+        hwAccelExtraFrames: 8,
+        // Stream pipeline mode (aligned with Tunarr channel stream modes)
+        // mpegts | hls | hls_slower | hls_direct | hls_direct_v2
+        streamMode: "mpegts",
+        // Container for HLS Direct / Direct v2 remux (mpegts | mkv | mp4)
+        hlsDirectContainer: "mpegts",
     }
 }
 

@@ -1,5 +1,6 @@
 const XMLWriter = require('xml-writer')
 const fs = require('fs')
+const { normalizeIconUrl } = require('./icon-url')
 
 module.exports = { WriteXMLTV: WriteXMLTV, shutdown: shutdown }
 
@@ -34,7 +35,7 @@ function writePromise(json, xmlSettings, throttle, cacheImageService) {
             let channelNumbers = [];
             Object.keys(json).forEach( (key, index) => channelNumbers.push(key) );
             let channels = channelNumbers.map( (number) => json[number].channel );
-            _writeChannels( xw, channels );
+            _writeChannels( xw, channels, xmlSettings, cacheImageService );
             for (let i = 0; i < channelNumbers.length; i++) {
                 let number = channelNumbers[i];
                 await _writePrograms(xw, json[number].channel, json[number].programs, throttle, xmlSettings, cacheImageService);
@@ -58,7 +59,11 @@ function _writeDocEnd(xw, ws) {
     xw.endDocument()
 }
 
-function _writeChannels(xw, channels) {
+function _writeChannels(xw, channels, xmlSettings, cacheImageService) {
+    let iconOpts = {
+        enableImageCache: xmlSettings && xmlSettings.enableImageCache === true,
+        cacheImageService: cacheImageService,
+    };
     for (let i = 0; i < channels.length; i++) {
         xw.startElement('channel')
         xw.writeAttribute('id', channels[i].number)
@@ -67,9 +72,13 @@ function _writeChannels(xw, channels) {
         xw.text(channels[i].name)
         xw.endElement()
         if (channels[i].icon) {
-            xw.startElement('icon')
-            xw.writeAttribute('src', channels[i].icon)
-            xw.endElement()
+            // Normalize so Google TV / Plex apps get a host they can actually fetch
+            let icon = normalizeIconUrl(channels[i].icon, iconOpts);
+            if (icon) {
+                xw.startElement('icon')
+                xw.writeAttribute('src', icon)
+                xw.endElement()
+            }
         }
         xw.endElement()
     }
@@ -119,11 +128,10 @@ async function _writeProgramme(channel, program, xw, xmlSettings, cacheImageServ
     // Icon
     if (typeof program.icon !== 'undefined') {
         xw.startElement('icon');
-        let icon = program.icon;
-        if (xmlSettings.enableImageCache === true) {
-            const imgUrl = cacheImageService.registerImageOnDatabase(icon);
-            icon = `{{host}}/cache/images/${imgUrl}`;
-        }
+        let icon = normalizeIconUrl(program.icon, {
+            enableImageCache: xmlSettings && xmlSettings.enableImageCache === true,
+            cacheImageService: cacheImageService,
+        });
         xw.writeAttribute('src', icon);
         xw.endElement();
     }

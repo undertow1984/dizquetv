@@ -1,16 +1,50 @@
+const { normalizeIconUrl } = require('../icon-url');
+
 /**
  * Manager and Generate M3U content
  *
  * @class M3uService
  */
 class M3uService {
-    constructor(fileCacheService, channelService) {
+    constructor(fileCacheService, channelService, db) {
         this.channelService = channelService;
         this.cacheService = fileCacheService;
+        this.db = db || null;
         this.cacheReady = false;
         this.channelService.on("channel-update", (data) => {
             this.clearCache();
         } );
+    }
+
+    /**
+     * Path suffix for a channel URL based on global FFmpeg stream mode (Tunarr-aligned).
+     * HDHR always uses /video (mpegts); this is for M3U/IPTV clients.
+     */
+    getStreamPathForMode(streamMode) {
+        let mode = (streamMode || 'mpegts').toString().toLowerCase();
+        switch (mode) {
+            case 'hls':
+            case 'hls_slower':
+            case 'hls_direct_v2':
+                return 'm3u8';
+            case 'hls_direct':
+                return 'hls-direct';
+            case 'mpegts':
+            default:
+                return 'video';
+        }
+    }
+
+    getConfiguredStreamMode() {
+        try {
+            if (this.db && this.db['ffmpeg-settings']) {
+                let s = this.db['ffmpeg-settings'].find()[0];
+                if (s && s.streamMode) {
+                    return String(s.streamMode).toLowerCase();
+                }
+            }
+        } catch (e) { /* ignore */ }
+        return 'mpegts';
     }
 
     /**
@@ -52,8 +86,20 @@ class M3uService {
 
         for (var i = 0; i < channels.length; i++) {
             if (channels[i].stealth !== true) {
-                data += `#EXTINF:0 tvg-id="${channels[i].number}" CUID="${channels[i].number}" tvg-chno="${channels[i].number}" tvg-name="${channels[i].name}" tvg-logo="${channels[i].icon}" group-title="${channels[i].groupTitle}",${channels[i].name}\n`
-                data += `{{host}}/video?channel=${channels[i].number}\n`
+                let logo = normalizeIconUrl(channels[i].icon || '');
+                if (!logo) {
+                    logo = '{{host}}/images/dizquetv.png';
+                }
+                let streamPath = this.getStreamPathForMode(this.getConfiguredStreamMode());
+                let mode = this.getConfiguredStreamMode();
+                let qs = `channel=${channels[i].number}`;
+                if (mode === 'hls_slower') {
+                    qs += '&streamMode=hls_slower';
+                } else if (mode === 'hls_direct_v2') {
+                    qs += '&streamMode=hls_direct_v2';
+                }
+                data += `#EXTINF:0 tvg-id="${channels[i].number}" CUID="${channels[i].number}" tvg-chno="${channels[i].number}" tvg-name="${channels[i].name}" tvg-logo="${logo}" group-title="${channels[i].groupTitle}",${channels[i].name}\n`
+                data += `{{host}}/${streamPath}?${qs}\n`
             }
         }
         if (channels.length === 0) {

@@ -31,6 +31,9 @@ class CacheImageService {
                 const hash = req.params.hash;
                 const imgItem = this.db.find({url: hash})[0];
                 if(imgItem) {
+                    // Help Plex / Google TV clients cache logos cleanly
+                    res.set('Cache-Control', 'public, max-age=86400');
+                    res.set('Access-Control-Allow-Origin', '*');
                     const file = await this.getImageFromCache(imgItem.url);
                     if(!file.length) {
                         const fileMimeType = await this.requestImageAndStore(Buffer.from(imgItem.url, 'base64').toString('ascii'), imgItem);

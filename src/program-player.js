@@ -29,10 +29,46 @@ class ProgramPlayer {
     constructor( context ) {
         this.context = context;
         let program = context.lineupItem;
+        // Clone settings so per-request mode flags do not mutate the shared DB object
+        context.ffmpegSettings = Object.assign({}, context.ffmpegSettings);
         if (context.m3u8) {
             context.ffmpegSettings.normalizeAudio = false;
             // people might want the codec normalization to stay because of player support
             context.ffmpegSettings.normalizeResolution = false;
+        }
+        // Stream mode is taken from the request context only (set by /stream), not
+        // re-read from global settings, so HDHR concat children stay classic MPEG-TS.
+        let mode = (context.streamMode || 'mpegts').toString().toLowerCase();
+        let remuxModes = { hls_direct: true, hls_direct_v2: true };
+        let isPlaceholder = program && (
+            program.type === 'loading' || program.type === 'offline' ||
+            program.type === 'interlude' || typeof(program.err) !== 'undefined'
+        );
+        if ((context.remuxOnly === true || remuxModes[mode]) && !isPlaceholder) {
+            context.ffmpegSettings.remuxOnly = true;
+            context.ffmpegSettings.normalizeAudio = false;
+            context.ffmpegSettings.normalizeResolution = false;
+            context.ffmpegSettings.normalizeVideoCodec = false;
+            context.ffmpegSettings.normalizeAudioCodec = false;
+            context.ffmpegSettings.enableHdrToneMapping = false;
+            if (context.ffmpegSettings.hlsDirectContainer) {
+                context.ffmpegSettings.outputFormat = context.ffmpegSettings.hlsDirectContainer;
+            }
+            console.log(`ProgramPlayer: remux/direct mode (${mode}), outputFormat=${context.ffmpegSettings.outputFormat || 'mpegts'}`);
+        } else {
+            context.ffmpegSettings.remuxOnly = false;
+            if (mode === 'mpegts' || !mode) {
+                context.ffmpegSettings.outputFormat = 'mpegts';
+            }
+        }
+        if (mode === 'hls_slower' && !isPlaceholder) {
+            // Stronger normalize for transitions (Tunarr "HLS alt" idea)
+            context.ffmpegSettings.normalizeAudio = true;
+            context.ffmpegSettings.normalizeResolution = true;
+            context.ffmpegSettings.normalizeVideoCodec = true;
+            context.ffmpegSettings.normalizeAudioCodec = true;
+            context.ffmpegSettings.remuxOnly = false;
+            console.log('ProgramPlayer: hls_slower mode — full normalize enabled');
         }
         context.ffmpegSettings.noRealTime = program.noRealTime;
         if ( typeof(program.err) !== 'undefined') {
