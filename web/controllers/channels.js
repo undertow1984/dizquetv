@@ -1,8 +1,21 @@
 module.exports = function ($scope, dizquetv) {
     $scope.channels = []
     $scope.showChannelConfig = false
+    $scope.showBulkImport = false
     $scope.selectedChannel = null
     $scope.selectedChannelIndex = -1
+
+    $scope.openBulkImport = () => {
+        $scope.showChannelConfig = false
+        $scope.showBulkImport = true
+    }
+
+    $scope.onBulkImportDone = (didImport) => {
+        $scope.showBulkImport = false
+        if (didImport) {
+            $scope.refreshChannels()
+        }
+    }
 
     $scope.refreshChannels = async () => {
         $scope.channels = [ { number: 1, pending: true} ]

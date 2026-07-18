@@ -55,6 +55,43 @@
     </div>
     
     <hr></hr>
+    <h6>Stream Mode</h6>
+    <div class="row">
+        <div class="col-sm-9">
+            <div class="form-group">
+                <label>Channel Stream Mode</label>
+                <select class="form-control custom-select" ng-model="settings.streamMode"
+                    ria-describedby="streamModeHelp"
+                    ng-options="o.id as o.description for o in streamModeOptions"></select>
+                <small id="streamModeHelp" class="form-text text-muted">
+                    Pipeline for <strong>IPTV / M3U</strong> channel URLs (Tunarr-style modes).
+                    <strong>Plex Live TV / HDHomeRun always uses classic MPEG-TS</strong> (<code>/video</code>) regardless of this setting — required for a continuous live TS pipe.
+                    Changing this does not alter HDHR; re-download your M3U after changing modes for IPTV apps.
+                    <ul class="mb-0 pl-3">
+                        <li><strong>MPEG-TS</strong> — Classic dizqueTV: per-program transcode + FFmpeg concat (also what HDHR uses).</li>
+                        <li><strong>HLS</strong> — M3U points at an HLS playlist of program segments. For IPTV clients that prefer HLS.</li>
+                        <li><strong>HLS alt</strong> — HLS with stronger normalization between items (more CPU).</li>
+                        <li><strong>HLS Direct</strong> — Single-item remux playlist (minimal processing). Not for Plex Live TV.</li>
+                        <li><strong>HLS Direct v2</strong> — Multi-item HLS playlist preferring remux/copy. Not for Plex Live TV.</li>
+                    </ul>
+                </small>
+            </div>
+        </div>
+    </div>
+    <div class="row" ng-show="settings.streamMode === 'hls_direct' || settings.streamMode === 'hls_direct_v2'">
+        <div class="col-sm-6">
+            <div class="form-group">
+                <label>HLS Direct Output Container</label>
+                <select class="form-control custom-select" ng-model="settings.hlsDirectContainer"
+                    ria-describedby="hlsDirectContainerHelp"
+                    ng-options="o.id as o.description for o in hlsDirectContainerOptions"></select>
+                <small id="hlsDirectContainerHelp" class="form-text text-muted">
+                    Remux container for Direct modes (MPEG-TS is safest for most clients; MKV/MP4 can improve soft subtitle options on compatible players).
+                </small>
+            </div>
+        </div>
+    </div>
+    <hr></hr>
     <h6>Miscellaneous Options</h6>
     <div class="row">
         <div class="col-sm-4">
@@ -80,7 +117,60 @@
                 <label>Video Buffer</label>
                 <select ng-model="settings.concatMuxDelay" ria-describedby="concatMuxDelayHelp"
                     ng-options="o.id as o.description for o in muxDelayOptions" ></select>
-                <small id="concatMuxDelayHelp" class="form-text text-muted">Note: If you experience playback issues upon stream start, try increasing this.</small>
+                <small id="concatMuxDelayHelp" class="form-text text-muted">
+                    Mux buffer on the continuous client-facing pipe only (<code>-muxdelay</code> / <code>-muxpreload</code>).
+                    Program segments always emit immediately so prewarm can fill faster.
+                    <strong>0</strong> is best for fastest tune-in. Try <strong>1–3 seconds</strong> only if the client starts then stutters.
+                    Applied after you click Update and retune the channel.
+                </small>
+            </div>
+        </div>
+        <div class="col-sm-6">
+            <div class="form-group">
+                <label>Transcoding Speed</label>
+                <select class="form-control custom-select" ng-model="settings.transcodingSpeed"
+                    ria-describedby="transcodingSpeedHelp"
+                    ng-options="o.id as o.description for o in transcodingSpeedOptions"></select>
+                <small id="transcodingSpeedHelp" class="form-text text-muted">
+                    Encoder speed vs quality when video is transcoded. Slower = better quality / more CPU. Faster = lower CPU / slightly lower quality. Mapped to FFmpeg <code>-preset</code> for software (libx264/libx265), NVENC, and QSV where supported. Has no effect when video is stream-copied.
+                </small>
+            </div>
+        </div>
+    </div>
+    <div class="row" ng-hide="isTranscodingNotNeeded()">
+        <div class="col-sm-4">
+            <div class="form-group">
+                <label>Hardware Decode</label>
+                <select class="form-control custom-select" ng-model="settings.hardwareDecode"
+                    ria-describedby="hardwareDecodeHelp"
+                    ng-options="o.id as o.description for o in hardwareDecodeOptions"></select>
+                <small id="hardwareDecodeHelp" class="form-text text-muted">
+                    FFmpeg <code>-hwaccel</code> for decoding. Use <strong>CUDA</strong> with <code>h264_nvenc</code> / <code>hevc_nvenc</code>
+                    (big help on 4K HEVC). Frames are copied to system memory so scale and subtitle burn still work.
+                    <strong>When HDR tone mapping is on, hardware decode is automatically skipped</strong> for that title
+                    so 10-bit PQ/HLG is preserved for zscale (encode still uses NVENC).
+                    <strong>Auto</strong> picks CUDA/QSV/D3D11/VideoToolbox from your video encoder. If the stream fails to start, set back to <strong>None</strong>.
+                </small>
+            </div>
+        </div>
+        <div class="col-sm-4" ng-show="settings.hardwareDecode && settings.hardwareDecode !== 'none'">
+            <div class="form-group">
+                <label>HW Decode Device (optional)</label>
+                <input type="text" class="form-control form-control-sm" ng-model="settings.hardwareDecodeDevice"
+                    placeholder="0 or /dev/dri/renderD128" ria-describedby="hwDeviceHelp"></input>
+                <small id="hwDeviceHelp" class="form-text text-muted">
+                    GPU index for CUDA/D3D11 (e.g. <code>0</code>), or VAAPI render node path. Leave empty for default.
+                </small>
+            </div>
+        </div>
+        <div class="col-sm-4" ng-show="settings.hardwareDecode && settings.hardwareDecode !== 'none'">
+            <div class="form-group">
+                <label>Extra HW Frames</label>
+                <input type="number" min="0" max="64" class="form-control form-control-sm"
+                    ng-model="settings.hwAccelExtraFrames" ria-describedby="hwFramesHelp"></input>
+                <small id="hwFramesHelp" class="form-text text-muted">
+                    <code>-extra_hw_frames</code> (default 8). Raise if you see “not enough frames in hw pool”.
+                </small>
             </div>
         </div>
     </div>
@@ -88,7 +178,7 @@
     <h6>Transcoding Features</h6>
     <div class="row">
         <div class="col-sm-9">
-            <input id=enableFFMPEGTranscoding" type="checkbox" ng-model="settings.enableFFMPEGTranscoding"  ></input>
+            <input id="enableFFMPEGTranscoding" type="checkbox" ng-model="settings.enableFFMPEGTranscoding"  ></input>
             <label for="enableFFMPEGTranscoding">Enable FFMPEG Transcoding</label>
             <small class="form-text text-muted">Transcoding is required for some features like channel overlay and measures to prevent issues when switching episodes. The trade-off is quality loss and additional computing resource requirements.
             </small>
@@ -151,6 +241,24 @@
             <select class='form-control custom-select'  ng-model="settings.deinterlaceFilter" ria-describedby="deinterlaceHelp"
             ng-options="o.value as o.description for o in deinterlaceOptions" ></select>
             <small id='deinterlaceHelp' class='form-text text-muted'>Deinterlace filter to use when video is interlaced. This is only needed when Plex transcoding is not used.</small>
+
+            <br ></br>
+            <input id="enableHdrToneMapping" type="checkbox" ng-model="settings.enableHdrToneMapping"
+                ng-disabled="isTranscodingNotNeeded()" ></input>
+            <label for="enableHdrToneMapping">HDR Tone Mapping</label>
+            <small class="form-text text-muted">
+                When enabled, HDR sources (HDR10 / PQ, HLG, Dolby Vision when detected) are tone-mapped to SDR so SDR clients and TVs display them correctly. Uses the same software chain as Tunarr (<code>zscale</code> with explicit input transfer + <code>tonemap</code> → BT.709). Only applied when HDR metadata is present. Requires FFmpeg built with <strong>libzimg</strong> (<code>zscale</code>) and the <code>tonemap</code> filter — builds without libzimg will fail on HDR titles when this is on.
+            </small>
+            <div ng-show="settings.enableHdrToneMapping" style="margin-top: 0.5rem;">
+                <label>Tone Mapping Algorithm</label>
+                <select class="form-control custom-select" ng-model="settings.hdrToneMappingAlgorithm"
+                    ria-describedby="hdrAlgoHelp"
+                    ng-options="o.id as o.description for o in hdrToneMapOptions"
+                    ng-disabled="isTranscodingNotNeeded()"></select>
+                <small id="hdrAlgoHelp" class="form-text text-muted">
+                    <strong>hable</strong> is a good general default. <strong>bt2390</strong> is often better for true HDR10 PQ content. <strong>reinhard</strong> / <strong>mobius</strong> are alternatives if highlights look crushed or washed out.
+                </small>
+            </div>
         </div>
 
         <div class="form-group">
@@ -169,6 +277,28 @@
             <br ></br>
             <label>Audio Sample Rate (k)</label>
             <input type="number" class="form-control form-control-sm" ng-model="settings.audioSampleRate"></input>
+            <br ></br>
+            <label>Preferred Audio / Subtitle Language</label>
+            <select class="form-control custom-select" ng-model="settings.preferredLanguage"
+                ria-describedby="preferredLanguageHelp"
+                ng-options="o.id as o.description for o in languageOptions"></select>
+            <small id="preferredLanguageHelp" class="form-text text-muted">
+                When a program has multiple audio or subtitle tracks, dizqueTV / FFmpeg will prefer tracks matching this language for both audio and subtitles (ISO 639 code, e.g. eng, spa). Falls back to the default/selected track if no match is found.
+            </small>
+            <br ></br>
+            <label for="subtitleMode">Subtitles (Live TV)</label>
+            <select id="subtitleMode" class="form-control custom-select" ng-model="settings.subtitleMode"
+                ria-describedby="subtitleModeHelp"
+                ng-options="o.id as o.description for o in subtitleModeOptions"></select>
+            <small id="subtitleModeHelp" class="form-text text-muted">
+                Uses the preferred language above for track selection. Live TV is MPEG-TS — that limits what Plex can toggle.
+                <ul class="mb-0 pl-3">
+                    <li><strong>Off</strong> — no subtitles from dizqueTV.</li>
+                    <li><strong>Soft only</strong> — soft-map <em>image</em> tracks (PGS / VOBSUB / DVB) when present so some Plex clients can show a Subtitles menu entry and turn them on/off. Text (SRT/ASS) is <em>not</em> burned and will not appear.</li>
+                    <li><strong>Soft + burn text</strong> — soft-map image tracks; extract and <em>burn</em> text tracks into the picture (always on; not in the Subtitles menu). First play of a title may pause briefly while text is extracted (<code>cache/subtitles</code> thereafter).</li>
+                </ul>
+                Soft text (SRT/ASS) cannot be carried reliably in MPEG-TS for Plex Live TV selection — that is a container/client limit, not a missing checkbox.
+            </small>
         </div>
 
 
@@ -231,6 +361,35 @@
         <div class="row">
             <div class="col-sm-9">
                 <div class="form-group">
+                    <input id="enableChannelWatermarkGlobally" type="checkbox"
+                        ng-model="settings.enableChannelWatermarkGlobally"
+                        ng-disabled="isTranscodingNotNeeded()" ></input>
+                    <label for="enableChannelWatermarkGlobally">Enable Channel Watermark Globally</label>
+                    <button type="button"
+                        class="btn btn-sm btn-outline-primary"
+                        style="margin-left: 0.5rem; vertical-align: baseline;"
+                        ng-show="settings.enableChannelWatermarkGlobally"
+                        ng-click="enableWatermarksOnAllChannels()"
+                        ng-disabled="isTranscodingNotNeeded() || watermarkApplyPending">
+                        <span class="fa fa-spinner fa-spin" ng-show="watermarkApplyPending"></span>
+                        Apply to All Existing Channels
+                    </button>
+                    <small class="form-text text-muted">
+                        When checked, new channels get watermark enabled by default
+                        (unless <em>Disable Channel Watermark Globally</em> is also checked).
+                        Use the button to turn on the channel watermark checkbox for every channel that exists right now.
+                        Click <strong>Update</strong> above to save this setting.
+                    </small>
+                    <div class="text-info small" ng-show="watermarkApplyStatus">{{ watermarkApplyStatus }}</div>
+                    <div class="text-danger small" ng-show="watermarkApplyError">{{ watermarkApplyError }}</div>
+                </div>
+            </div>
+        </div>
+
+        <br ></br>
+        <div class="row">
+            <div class="col-sm-9">
+                <div class="form-group">
                     <input id="disableOverlay" type="checkbox" ng-model="settings.disableChannelOverlay" ng-disabled="isTranscodingNotNeeded()" ></input>
                     <label for="disableOverlay">Disable Channel Watermark Globally</label>
                     <small class="form-text text-muted">Toggling this option will disable channel watermarks regardless of channel settings.
@@ -245,7 +404,11 @@
                 <div class="form-group">
                     <input id="disablePreludes" type="checkbox" ng-model="settings.disablePreludes" ng-disabled="isTranscodingNotNeeded()" ></input>
                     <label for="disablePreludes">Disable Preludes</label>
-                    <small class="form-text text-muted">In an attempt to improve playback, dizqueTV insets really short clips of black screen between videos. The idea is that if the stream pauses because Plex is taking too long to reply, it will pause during one of those black screens instead of interrupting the last second of a video. If you suspect these black screens are causing trouble instead of helping, you can disable them with this option.
+                    <small class="form-text text-muted">
+                        When enabled, dizqueTV skips the <strong>loading splash</strong> at tune-in and the short
+                        <strong>black-frame gaps</strong> between programs. Those clips are meant to hide pauses while
+                        Plex/FFmpeg catch up; turn this on if you prefer to start the real program immediately (may show
+                        a brief stall instead of the loading image).
                     </small>
                 </div>
             </div>

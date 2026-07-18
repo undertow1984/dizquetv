@@ -1,7 +1,46 @@
 const Plex = require('../../src/plex');
 
-module.exports = function ($http, $window, $interval) {
+module.exports = function ($http, $window, $interval, dizquetv) {
+    let _disabledCache = null;
+    let _disabledCacheAt = 0;
+    const DISABLED_CACHE_MS = 3000;
+
+    async function getDisabledLibrarySet(forceRefresh) {
+        let now = Date.now();
+        if (!forceRefresh && _disabledCache && (now - _disabledCacheAt) < DISABLED_CACHE_MS) {
+            return _disabledCache;
+        }
+        let set = {};
+        try {
+            let settings = await dizquetv.getPlexLibrarySettings();
+            let list = (settings && settings.disabledLibraries) ? settings.disabledLibraries : [];
+            for (let i = 0; i < list.length; i++) {
+                let d = list[i];
+                if (d && d.serverName && d.sectionKey) {
+                    set[String(d.serverName) + "|" + String(d.sectionKey)] = true;
+                }
+            }
+        } catch (err) {
+            console.error("Could not load plex library enable settings", err);
+        }
+        _disabledCache = set;
+        _disabledCacheAt = now;
+        return set;
+    }
+
+    function isLibraryDisabled(disabledSet, serverName, sectionKey) {
+        if (!disabledSet || !serverName || sectionKey == null) {
+            return false;
+        }
+        return disabledSet[String(serverName) + "|" + String(sectionKey)] === true;
+    }
+
     let exported = {
+        /** Clear cached disabled-library flags (call after management save). */
+        clearLibrarySettingsCache: () => {
+            _disabledCache = null;
+            _disabledCacheAt = 0;
+        },
         login: async () => {
             const headers = {
                 'Accept': 'application/json',
@@ -107,12 +146,22 @@ module.exports = function ($http, $window, $interval) {
             }
         },
 
-        getLibrary: async (server) => {
+        /**
+         * @param {*} server
+         * @param {{ includeDisabled?: boolean }} [options] includeDisabled=true for management UI
+         */
+        getLibrary: async (server, options) => {
+            options = options || {};
             var client = new Plex(server)
             const res = await client.Get('/library/sections')
             var sections = []
+            let disabled = options.includeDisabled ? {} : await getDisabledLibrarySet();
             for (let i = 0, l = typeof res.Directory !== 'undefined' ? res.Directory.length : 0; i < l; i++)
                 if (res.Directory[i].type === 'movie' || res.Directory[i].type === 'show' || res.Directory[i].type === 'artist' ) {
+                    let sectionKey = String(res.Directory[i].key);
+                    if (!options.includeDisabled && isLibraryDisabled(disabled, server.name, sectionKey)) {
+                        continue;
+                    }
                     var genres = []
                     if (res.Directory[i].type === 'movie') {
                         const genresRes = await client.Get(`/library/sections/${res.Directory[i].key}/genre`)
@@ -130,9 +179,11 @@ module.exports = function ($http, $window, $interval) {
                     sections.push({
                         title: res.Directory[i].title,
                         key: `/library/sections/${res.Directory[i].key}/all`,
+                        sectionKey: sectionKey,
                         icon: `${server.uri}${res.Directory[i].composite}?X-Plex-Token=${server.accessToken}`,
                         type: res.Directory[i].type,
-                        genres: genres
+                        genres: genres,
+                        serverName: server.name,
                     })
                 }
             return sections
@@ -151,10 +202,91 @@ module.exports = function ($http, $window, $interval) {
                         title: res.Metadata[i].title,
                         key: res.Metadata[i].key,
                         icon: `${server.uri}${res.Metadata[i].composite}?X-Plex-Token=${server.accessToken}`,
-                        duration: res.Metadata[i].duration
+                        duration: res.Metadata[i].duration,
+                        // leafCount = items in playlist (movies/episodes/tracks)
+                        count: plexItemCount(res.Metadata[i]),
                     })
                 }
             return playlists
+        },
+        getCollections: async (server) => {
+            var client = new Plex(server)
+            const res = await client.Get('/library/sections')
+            var collections = []
+            let disabled = await getDisabledLibrarySet();
+            for (let i = 0, l = typeof res.Directory !== 'undefined' ? res.Directory.length : 0; i < l; i++) {
+                let section = res.Directory[i];
+                if (section.type !== 'movie' && section.type !== 'show') {
+                    continue;
+                }
+                if (isLibraryDisabled(disabled, server.name, String(section.key))) {
+                    continue;
+                }
+                try {
+                    let collectionsRes = await client.Get(`/library/sections/${section.key}/collections`);
+                    let metadata = (typeof collectionsRes.Metadata !== 'undefined') ? collectionsRes.Metadata : [];
+                    for (let q = 0; q < metadata.length; q++) {
+                        let title = metadata[q].title;
+                        if (section.type === 'show') {
+                            title = metadata[q].title + " Collection";
+                        }
+                        collections.push({
+                            title: title,
+                            key: metadata[q].key,
+                            type: "collection",
+                            collectionType: section.type,
+                            libraryTitle: section.title,
+                            icon: metadata[q].thumb
+                                ? `${server.uri}${metadata[q].thumb}?X-Plex-Token=${server.accessToken}`
+                                : "",
+                            // childCount/leafCount = movies or shows in the collection
+                            count: plexItemCount(metadata[q]),
+                        });
+                    }
+                } catch (err) {
+                    console.error("Unable to load collections for library section " + section.title, err);
+                }
+            }
+            return collections
+        },
+        /**
+         * Flat list of TV shows from enabled show libraries (no collections).
+         * Same shape as playlists/collections for bulk import & content sources.
+         */
+        getShows: async (server) => {
+            let sections = await exported.getLibrary(server);
+            let shows = [];
+            let errors = [];
+            for (let i = 0; i < sections.length; i++) {
+                let section = sections[i];
+                if (section.type !== 'show') {
+                    continue;
+                }
+                try {
+                    let nested = await exported.getNested(server, section, false, errors);
+                    for (let j = 0; j < (nested || []).length; j++) {
+                        let item = nested[j];
+                        if (!item || item.type !== 'show') {
+                            continue;
+                        }
+                        shows.push({
+                            title: item.title,
+                            key: item.key,
+                            type: "show",
+                            libraryTitle: section.title,
+                            icon: item.icon || "",
+                            ratingKey: item.ratingKey,
+                            // childCount when Plex provides it on the metadata object
+                            count: (typeof item.childCount !== 'undefined')
+                                ? item.childCount
+                                : (typeof item.leafCount !== 'undefined' ? item.leafCount : null),
+                        });
+                    }
+                } catch (err) {
+                    console.error("Unable to load shows for library section " + section.title, err);
+                }
+            }
+            return shows;
         },
         getStreams: async (server, key) => {
             var client = new Plex(server)
@@ -167,6 +299,44 @@ module.exports = function ($http, $window, $interval) {
                 }
                 return streams
             })
+        },
+        /**
+         * Recursively expand a playlist/collection/show/season into playable programs.
+         */
+        expandToPrograms: async function expandToPrograms(server, item, errors) {
+            if (!item) {
+                return [];
+            }
+            if (item.type === 'movie' || item.type === 'episode' || item.type === 'track') {
+                let copy = JSON.parse(JSON.stringify(item));
+                delete copy.server;
+                delete copy.nested;
+                delete copy.collapse;
+                copy.serverKey = server.name;
+                if (typeof copy.commercials === 'undefined') {
+                    copy.commercials = [];
+                }
+                return [copy];
+            }
+
+            let nested = [];
+            try {
+                nested = await exported.getNested(server, item, false, errors || []);
+            } catch (err) {
+                let msg = "Unable to load items for " + (item.title || item.key);
+                if (errors) {
+                    errors.push(msg);
+                }
+                console.error(msg, err);
+                return [];
+            }
+
+            let result = [];
+            for (let i = 0; i < nested.length; i++) {
+                let more = await expandToPrograms(server, nested[i], errors);
+                result = result.concat(more);
+            }
+            return result;
         },
         getNested: async (server, lib, includeCollections, errors) => {
             var client = new Plex(server)
@@ -329,4 +499,22 @@ function msToTime(duration) {
     seconds = (seconds < 10) ? "0" + seconds : seconds;
 
     return hours + ":" + minutes + ":" + seconds + "." + milliseconds;
+}
+
+/** Best-effort item count from Plex playlist/collection metadata. */
+function plexItemCount(meta) {
+    if (!meta) {
+        return null;
+    }
+    // Prefer childCount for collections (movies/shows), leafCount for playlists
+    let candidates = [meta.childCount, meta.leafCount, meta.size];
+    for (let i = 0; i < candidates.length; i++) {
+        if (typeof candidates[i] !== 'undefined' && candidates[i] !== null && candidates[i] !== '') {
+            let n = parseInt(candidates[i], 10);
+            if (!isNaN(n)) {
+                return n;
+            }
+        }
+    }
+    return null;
 }

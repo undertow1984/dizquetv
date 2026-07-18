@@ -58,6 +58,89 @@ module.exports = function (getShowData) {
         return array
     }
 
+    /**
+     * Shuffle programs while preserving logical episode order within each show.
+     * e.g. Show A S01E01 may be followed by any other program, but the next time
+     * Show A appears it will be S01E02 (not a later/earlier episode).
+     *
+     * Algorithm: group by show, sort each group by episode order, then repeatedly
+     * pick a random show that still has episodes and take the next one in order.
+     * Flex/offline slots are reinserted at random positions afterward.
+     */
+    function shuffleInOrder(programs) {
+        if (!programs || programs.length <= 1) {
+            return programs || [];
+        }
+        let queues = {};
+        let showIds = [];
+        let flex = [];
+
+        for (let i = 0; i < programs.length; i++) {
+            let prog = programs[i];
+            let data = getShowData(prog);
+            if (!data.hasShow) {
+                flex.push(prog);
+                continue;
+            }
+            let id = data.showId;
+            if (typeof queues[id] === 'undefined') {
+                queues[id] = [];
+                showIds.push(id);
+            }
+            queues[id].push({
+                program: prog,
+                order: (typeof data.order === 'number') ? data.order : 0,
+            });
+        }
+
+        // Sort each show's queue into air-date / episode order
+        for (let s = 0; s < showIds.length; s++) {
+            let id = showIds[s];
+            queues[id].sort((a, b) => {
+                if (a.order < b.order) {
+                    return -1;
+                }
+                if (a.order > b.order) {
+                    return 1;
+                }
+                return 0;
+            });
+            // convert to plain program queues
+            let plain = [];
+            for (let j = 0; j < queues[id].length; j++) {
+                plain.push(queues[id][j].program);
+            }
+            queues[id] = plain;
+        }
+
+        // Randomly interleave shows while always taking the next episode in order
+        let active = showIds.slice();
+        shuffle(active);
+        let result = [];
+        while (active.length > 0) {
+            let pick = Math.floor(Math.random() * active.length);
+            let id = active[pick];
+            result.push(queues[id].shift());
+            if (queues[id].length === 0) {
+                active.splice(pick, 1);
+            }
+        }
+
+        // Re-insert flex/offline at random positions
+        shuffle(flex);
+        for (let f = 0; f < flex.length; f++) {
+            let pos = Math.floor(Math.random() * (result.length + 1));
+            result.splice(pos, 0, flex[f]);
+        }
+
+        // Mutate original array in place so callers that hold the reference stay in sync
+        programs.length = 0;
+        for (let i = 0; i < result.length; i++) {
+            programs.push(result[i]);
+        }
+        return programs;
+    }
+
 
     let removeDuplicates = (progs) => {
         let tmpProgs = {}
@@ -263,6 +346,7 @@ module.exports = function (getShowData) {
     return {
         sortShows: sortShows,
         shuffle: shuffle,
+        shuffleInOrder: shuffleInOrder,
         removeDuplicates: removeDuplicates,
         removeSpecials: removeSpecials,
         sortByDate: sortByDate,

@@ -6,6 +6,17 @@ module.exports = function ($http, $q) {
         getPlexServers: () => {
             return $http.get('/api/plex-servers').then((d) => { return d.data })
         },
+        getPlexLibrarySettings: () => {
+            return $http.get('/api/plex-library-settings').then((d) => { return d.data })
+        },
+        updatePlexLibrarySettings: (settings) => {
+            return $http({
+                method: 'PUT',
+                url: '/api/plex-library-settings',
+                data: settings,
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            }).then((d) => { return d.data })
+        },
         addPlexServer: (plexServer) => {
             return $http({
                 method: 'PUT',
@@ -84,6 +95,13 @@ module.exports = function ($http, $q) {
                 method: 'POST',
                 url: '/api/ffmpeg-settings',
                 data: angular.toJson(config),
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            }).then((d) => { return d.data })
+        },
+        enableWatermarksOnAllChannels: () => {
+            return $http({
+                method: 'POST',
+                url: '/api/channels/enable-watermarks',
                 headers: { 'Content-Type': 'application/json; charset=utf-8' }
             }).then((d) => { return d.data })
         },

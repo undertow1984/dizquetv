@@ -4,10 +4,23 @@
 
     <h5>
         Custom Shows
-        <button class="pull-right btn btn-sm btn-primary" ng-click="selectShow(-1)">
+        <button class="pull-right btn btn-sm btn-primary" ng-click="selectShow(-1)" title="Create custom show">
             <span class="fa fa-plus"></span>
         </button>
+        <button class="pull-right btn btn-sm btn-secondary" style="margin-right: 0.4rem;"
+            ng-click="refreshFromPlex()"
+            ng-disabled="refreshing || shows.length === 0"
+            title="Refresh content from Plex playlists/collections that match each custom show name">
+            <span class="fa fa-sync" ng-class="{'fa-spin': refreshing}"></span>
+            Refresh
+        </button>
     </h5>
+    <p class="small text-muted">
+        <strong>Refresh</strong> replaces each custom show&apos;s clips from any Plex playlist and/or collection
+        whose name matches the custom show name (case-insensitive). If both a playlist and a collection match, both are imported.
+    </p>
+    <div class="text-info small" ng-show="refreshStatus">{{ refreshStatus }}</div>
+    <div class="text-danger small" ng-repeat="e in refreshErrors track by $index">{{ e }}</div>
     <table class="table">
         <tr>
             <th>Name</th>
@@ -26,7 +39,7 @@
             </td>
             <td>{{x.count}}</td>
             <td>
-                <button class='btn btn-link' title='Delete...' ng-click='deleteShow($index)' >
+                <button class='btn btn-link' title='Delete...' ng-click='deleteShow($index); $event.stopPropagation()' >
                     <i class='fas fa-trash-alt text-danger'></i>
                 </button>
             </td>

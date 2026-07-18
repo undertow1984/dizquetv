@@ -95,7 +95,7 @@ if(!fs.existsSync(path.join(process.env.DATABASE, 'cache','images'))) {
 
 channelDB = new ChannelDB( path.join(process.env.DATABASE, 'channels') );
 
-db.connect(process.env.DATABASE, ['channels', 'plex-servers', 'ffmpeg-settings', 'plex-settings', 'xmltv-settings', 'hdhr-settings', 'db-version', 'client-id', 'cache-images', 'settings'])
+db.connect(process.env.DATABASE, ['channels', 'plex-servers', 'ffmpeg-settings', 'plex-settings', 'xmltv-settings', 'hdhr-settings', 'db-version', 'client-id', 'cache-images', 'settings', 'plex-library-settings'])
 
 let fontAwesome = "fontawesome-free-5.15.4-web";
 let bootstrap = "bootstrap-4.4.1-dist";
@@ -122,7 +122,7 @@ initializeProgramPlayTimeDB();
 
 fileCache = new FileCacheService( path.join(process.env.DATABASE, 'cache') );
 cacheImageService = new CacheImageService(db, fileCache);
-m3uService = new M3uService(fileCache, channelService)
+m3uService = new M3uService(fileCache, channelService, db)
 
 onDemandService = new OnDemandService(channelService);
 programmingService = new ProgrammingService(onDemandService);
@@ -279,11 +279,18 @@ app.get('/version.js', (req, res) => {
     ` );
     res.end();
 });
-app.use('/images', express.static(path.join(process.env.DATABASE, 'images')))
+// Channel logos for Plex/Google TV: allow caching and cross-origin fetch
+const logoStaticOptions = {
+    setHeaders: (res) => {
+        res.set('Cache-Control', 'public, max-age=86400');
+        res.set('Access-Control-Allow-Origin', '*');
+    }
+};
+app.use('/images', express.static(path.join(process.env.DATABASE, 'images'), logoStaticOptions))
 app.use(express.static(path.join(__dirname, 'web','public')))
-app.use('/images', express.static(path.join(process.env.DATABASE, 'images')))
+app.use('/images', express.static(path.join(process.env.DATABASE, 'images'), logoStaticOptions))
 app.use('/cache/images', cacheImageService.routerInterceptor())
-app.use('/cache/images', express.static(path.join(process.env.DATABASE, 'cache','images')))
+app.use('/cache/images', express.static(path.join(process.env.DATABASE, 'cache','images'), logoStaticOptions))
 app.use('/favicon.svg', express.static(
     path.join(__dirname, 'resources','favicon.svg')
 ) );

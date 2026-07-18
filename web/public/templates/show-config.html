@@ -12,7 +12,8 @@
                             <label for="name">Show Name:</label>
                             <input type="text" class="form-control" id="name" placeholder="Show Name" ng-model="name" ></input>
                         </div>
-        
+
+                        <!-- Section 1: Library / collections import (via + button below) -->
                         <h6 style="margin-top: 10px;">Clips</h6>
         
                         <div class="flex-container">
@@ -77,7 +78,57 @@
         
                         
                         <div ng-show="content.length === 0">
-                            <p class="text-center text-info">Click the <span class="fa fa-plus"></span> to import show content from your Plex server(s).</p>
+                            <p class="text-center text-info">Click the <span class="fa fa-plus"></span> to import show content from your Plex server(s), or import a playlist below.</p>
+                        </div>
+
+                        <!-- Section 2: Import entire Plex playlists -->
+                        <div class="form-group" style="margin-top: 1.25rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.1);">
+                            <h6>Import from Plex Playlist</h6>
+                            <p class="small text-muted mb-2">
+                                Import all items from a Plex playlist into this custom show.
+                                If the show name is empty, it will be set from the playlist title.
+                            </p>
+
+                            <div ng-show="plexServers.length === 0" class="text-info small">
+                                Configure a Plex server in <a href="/#!/settings#plex">Settings</a> to import playlists.
+                            </div>
+
+                            <div ng-show="plexServers.length &gt; 0" class="row">
+                                <div class="col-md-4" style="padding: 5px;">
+                                    <label class="small" for="playlist-server">Plex Server</label>
+                                    <select id="playlist-server"
+                                        class="form-control form-control-sm"
+                                        ng-model="playlistImport.serverName"
+                                        ng-options="s.name as s.name for s in plexServers"
+                                        ng-change="loadPlaylists()"
+                                        ng-disabled="playlistImport.pending">
+                                    </select>
+                                </div>
+                                <div class="col-md-5" style="padding: 5px;">
+                                    <label class="small" for="playlist-select">Playlist</label>
+                                    <select id="playlist-select"
+                                        class="form-control form-control-sm"
+                                        ng-model="playlistImport.key"
+                                        ng-options="p.key as p.title for p in playlists track by p.key"
+                                        ng-disabled="playlistImport.pending || playlists.length === 0">
+                                    </select>
+                                    <div class="small text-muted" ng-show="playlists.length === 0 && playlistImport.serverName">
+                                        No video/audio playlists found on this server.
+                                    </div>
+                                </div>
+                                <div class="col-md-3" style="padding: 5px;">
+                                    <label class="small d-block">&nbsp;</label>
+                                    <button type="button"
+                                        class="btn btn-sm btn-primary form-control"
+                                        ng-click="importPlaylist()"
+                                        ng-disabled="!playlistImport.key || playlistImport.pending">
+                                        <span class="fa fa-file-import" ng-show="!playlistImport.pending"></span>
+                                        <span class="fa fa-spinner fa-spin" ng-show="playlistImport.pending"></span>
+                                        Import Playlist
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="text-danger small" ng-repeat="e in playlistImport.errors track by $index">{{ e }}</div>
                         </div>
     
                     </div>

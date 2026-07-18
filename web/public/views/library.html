@@ -33,8 +33,90 @@
             </div>
        
         </div>
+        <div class='col-md-auto'>
+            <div class="card" style="width: 18rem; cursor: pointer;" ng-click="openManagement()">
+                <div class="card-body">
+                  <h5 class="card-title"><a href="" class="card-link" ng-click="openManagement(); $event.preventDefault()">Management...</a></h5>
+        
+                  <p class="card-text">Enable or disable Plex libraries for use in dizqueTV. Disabled libraries are hidden from channel programming, bulk import, and other tools.</p>
+                  
+                </div>
+            </div>
+       
+        </div>
     </div>
 
+    <!-- Management modal -->
+    <div ng-show="showManagement">
+        <div class="modal" tabindex="-1" role="dialog" style="display: block; background-color: rgba(0, 0, 0, .5);">
+            <div class="modal-dialog modal-dialog-scrollable modal-lg" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Plex Library Management</h5>
+                    </div>
+                    <div class="modal-body">
+                        <p class="small text-muted">
+                            Toggle libraries on or off. Disabled libraries are not used anywhere in dizqueTV
+                            (Add Programming, bulk import, content sources, etc.). Changes save automatically.
+                        </p>
+
+                        <div class="mb-2">
+                            <button type="button" class="btn btn-sm btn-outline-secondary"
+                                ng-click="loadManagementLibraries()"
+                                ng-disabled="managementLoading || managementSaving">
+                                Reload
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary ml-1"
+                                ng-click="enableAllLibraries()"
+                                ng-disabled="managementLoading || managementSaving || managementLibraries.length === 0">
+                                Enable all
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary ml-1"
+                                ng-click="disableAllLibraries()"
+                                ng-disabled="managementLoading || managementSaving || managementLibraries.length === 0">
+                                Disable all
+                            </button>
+                        </div>
+
+                        <div class="loader" ng-show="managementLoading"></div>
+                        <div class="text-danger small" ng-show="managementError">{{ managementError }}</div>
+                        <div class="text-info small" ng-show="managementStatus">{{ managementStatus }}</div>
+
+                        <div class="list-group" ng-show="!managementLoading && managementLibraries.length &gt; 0">
+                            <div class="list-group-item d-flex align-items-center"
+                                ng-repeat="lib in managementLibraries track by (lib.serverName + '-' + lib.sectionKey)">
+                                <div class="custom-control custom-switch mr-3">
+                                    <input type="checkbox"
+                                        class="custom-control-input"
+                                        id="lib-toggle-{{$index}}"
+                                        ng-model="lib.enabled"
+                                        ng-change="toggleLibrary(lib)"
+                                        ng-disabled="managementSaving" />
+                                    <label class="custom-control-label" for="lib-toggle-{{$index}}"></label>
+                                </div>
+                                <div class="flex-grow-1">
+                                    <strong>{{ lib.title }}</strong>
+                                    <span class="badge badge-secondary text-capitalize ml-1">{{ lib.type }}</span>
+                                    <div class="small text-muted">{{ lib.serverName }} · section {{ lib.sectionKey }}</div>
+                                </div>
+                                <span class="small" ng-class="lib.enabled ? 'text-success' : 'text-muted'">
+                                    {{ lib.enabled ? 'On' : 'Off' }}
+                                </span>
+                            </div>
+                        </div>
+                        <div class="text-muted small" ng-show="!managementLoading && managementLibraries.length === 0 && !managementError">
+                            No movie/TV/music libraries found on your Plex servers.
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-sm btn-primary" ng-click="closeManagement()" ng-disabled="managementSaving">
+                            Done
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
      
 </div>

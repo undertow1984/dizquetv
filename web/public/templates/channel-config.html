@@ -43,6 +43,159 @@
                         <small id='groupTitleHelp' class="text-muted" for='channelNumber'>This is used by iptv clients to categorize the channels. You can leave it as dizqueTV if you don&apos;t need this sort of classification.</small>
                     </div>
 
+                    <div class='form-group'>
+                        <label class='form-label'>Content Sources</label>
+                        <p class="small text-muted mb-2">
+                            Plex playlists, collections, and TV shows. Check items to link them as content sources.
+                            <strong>Refresh programming from selected</strong> and <strong>Update Channel</strong> re-import
+                            linked sources, keep the current programming order, add only new items, keep manual programs,
+                            and remove duplicates (same logic as Programming → Duplicates).
+                        </p>
+                        <div class="loader" ng-show="contentSourcesLoading"></div>
+                        <div class="text-danger small" ng-show="contentSourcesError">{{ contentSourcesError }}</div>
+
+                        <div class="row" ng-show="!contentSourcesLoading">
+                            <div class="col-md-4 mb-2">
+                                <div class="card">
+                                    <div class="card-header py-2 flex-container" style="align-items: center;">
+                                        <strong>Playlists</strong>
+                                        <span class="flex-pull-right small text-muted">
+                                            {{ contentSourcePlaylists.length }} total
+                                        </span>
+                                    </div>
+                                    <div class="px-2 py-2 border-bottom">
+                                        <input type="search"
+                                            class="form-control form-control-sm"
+                                            placeholder="Search playlists..."
+                                            ng-model="contentSourcePlaylistFilter"
+                                            ng-model-options="{ debounce: 100 }"
+                                            autocomplete="off" />
+                                    </div>
+                                    <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
+                                        <div ng-show="contentSourcePlaylists.length === 0" class="p-3 text-muted small">
+                                            No playlists found.
+                                        </div>
+                                        <div ng-show="contentSourcePlaylists.length &gt; 0 && (contentSourcePlaylists | filter:contentSourcePlaylistFilter).length === 0"
+                                            class="p-3 text-muted small">
+                                            No playlists match your search.
+                                        </div>
+                                        <div class="list-group list-group-flush">
+                                            <label class="list-group-item list-group-item-action mb-0 py-2"
+                                                style="cursor: pointer;"
+                                                ng-repeat="p in contentSourcePlaylists | filter:contentSourcePlaylistFilter track by (p.serverName + '-' + p.key)">
+                                                <input type="checkbox"
+                                                    ng-model="p.selected"
+                                                    ng-change="onContentSourceCheckChange()"
+                                                    style="margin-right: 0.5rem;" />
+                                                {{ p.title }}
+                                                <span ng-if="p.count !== null && p.count !== undefined"> ({{ p.count }})</span>
+                                                <span class="text-muted small" ng-if="p.serverName"> — {{ p.serverName }}</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-4 mb-2">
+                                <div class="card">
+                                    <div class="card-header py-2 flex-container" style="align-items: center;">
+                                        <strong>Collections</strong>
+                                        <span class="flex-pull-right small text-muted">
+                                            {{ contentSourceCollections.length }} total
+                                        </span>
+                                    </div>
+                                    <div class="px-2 py-2 border-bottom">
+                                        <input type="search"
+                                            class="form-control form-control-sm"
+                                            placeholder="Search collections..."
+                                            ng-model="contentSourceCollectionFilter"
+                                            ng-model-options="{ debounce: 100 }"
+                                            autocomplete="off" />
+                                    </div>
+                                    <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
+                                        <div ng-show="contentSourceCollections.length === 0" class="p-3 text-muted small">
+                                            No collections found.
+                                        </div>
+                                        <div ng-show="contentSourceCollections.length &gt; 0 && (contentSourceCollections | filter:contentSourceCollectionFilter).length === 0"
+                                            class="p-3 text-muted small">
+                                            No collections match your search.
+                                        </div>
+                                        <div class="list-group list-group-flush">
+                                            <label class="list-group-item list-group-item-action mb-0 py-2"
+                                                style="cursor: pointer;"
+                                                ng-repeat="c in contentSourceCollections | filter:contentSourceCollectionFilter track by (c.serverName + '-' + c.key + '-' + (c.libraryTitle || ''))">
+                                                <input type="checkbox"
+                                                    ng-model="c.selected"
+                                                    ng-change="onContentSourceCheckChange()"
+                                                    style="margin-right: 0.5rem;" />
+                                                {{ c.title }}
+                                                <span ng-if="c.count !== null && c.count !== undefined"> ({{ c.count }})</span>
+                                                <span class="text-muted small" ng-if="c.libraryTitle"> — {{ c.libraryTitle }}</span>
+                                                <span class="text-muted small" ng-if="c.serverName"> ({{ c.serverName }})</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-4 mb-2">
+                                <div class="card">
+                                    <div class="card-header py-2 flex-container" style="align-items: center;">
+                                        <strong>TV Shows</strong>
+                                        <span class="flex-pull-right small text-muted">
+                                            {{ contentSourceShows.length }} total
+                                        </span>
+                                    </div>
+                                    <div class="px-2 py-2 border-bottom">
+                                        <input type="search"
+                                            class="form-control form-control-sm"
+                                            placeholder="Search TV shows..."
+                                            ng-model="contentSourceShowFilter"
+                                            ng-model-options="{ debounce: 100 }"
+                                            autocomplete="off" />
+                                    </div>
+                                    <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
+                                        <div ng-show="contentSourceShows.length === 0" class="p-3 text-muted small">
+                                            No TV shows found (or all show libraries are disabled).
+                                        </div>
+                                        <div ng-show="contentSourceShows.length &gt; 0 && (contentSourceShows | filter:contentSourceShowFilter).length === 0"
+                                            class="p-3 text-muted small">
+                                            No TV shows match your search.
+                                        </div>
+                                        <div class="list-group list-group-flush">
+                                            <label class="list-group-item list-group-item-action mb-0 py-2"
+                                                style="cursor: pointer;"
+                                                ng-repeat="s in contentSourceShows | filter:contentSourceShowFilter track by (s.serverName + '-' + s.key + '-' + (s.libraryTitle || ''))">
+                                                <input type="checkbox"
+                                                    ng-model="s.selected"
+                                                    ng-change="onContentSourceCheckChange()"
+                                                    style="margin-right: 0.5rem;" />
+                                                {{ s.title }}
+                                                <span ng-if="s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
+                                                <span class="text-muted small" ng-if="s.libraryTitle"> — {{ s.libraryTitle }}</span>
+                                                <span class="text-muted small" ng-if="s.serverName"> ({{ s.serverName }})</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-1">
+                            <span class="small text-muted">{{ contentSourceSelectedCount() }} source(s) linked</span>
+                            <button type="button" class="btn btn-sm btn-outline-secondary ml-2"
+                                ng-click="loadContentSourceCatalog()"
+                                ng-disabled="contentSourcesLoading || contentSourcesSyncing">
+                                Reload lists
+                            </button>
+                            <button type="button" class="btn btn-sm btn-primary ml-1"
+                                ng-click="syncProgrammingFromContentSources()"
+                                ng-disabled="contentSourcesLoading || contentSourcesSyncing || contentSourceSelectedCount() === 0">
+                                <span class="fa fa-spinner fa-spin" ng-show="contentSourcesSyncing"></span>
+                                Refresh programming from selected
+                            </button>
+                        </div>
+                        <div class="text-info small mt-1" ng-show="contentSourcesSyncStatus">{{ contentSourcesSyncStatus }}</div>
+                    </div>
+
                     <div>
                         <span class="pull-right text-danger">{{error.icon}}</span>
                         <label for="channelIcon" class="small">Channel Icon</label>
@@ -238,6 +391,19 @@
                                     </div>
                                     <p for="randomShuffleHelp" class='form-label' ng-show='showHelp.check'>
                                         Completely randomizes the order of programs.
+                                    </p>
+                                </div>
+
+                                <div ng-class="toolThin()" style="padding: 5px;"  ng-show="hasPrograms()" >
+                                    <div class="input-group">
+                                      <button class="btn btn-sm btn-warning form-control form-control-sm" type="button" ng-click="shuffleInOrder()" title='Shuffle in Order' >
+                                          <i class='fa fa-random'></i> Shuffle in Order
+                                      </button>
+                                    </div>
+                                    <p ng-show='showHelp.check'>
+                                        Shuffles shows together, but keeps each show&apos;s episodes in logical air order.
+                                        After Season 1 Episode 1 of a show, something else can play next — but the next time
+                                        that show appears it will be Season 1 Episode 2, then Episode 3, and so on.
                                     </p>
                                 </div>
 
@@ -921,12 +1087,13 @@
 
                 <div class="modal-footer">
                     <span class="pull-right text-danger" ng-show="error.any"> <i class='fa fa-exclamation-triangle'></i> There were errors. Please review the form.</span>
-                    <span class="pull-right text-info" ng-show='! hasPrograms() && (tab != "programming")'> <i class='fas fa-info-circle'></i> Use the &quot;Programming&quot; tab to add programs to the channel.</span>
+                    <span class="pull-right text-info" ng-show='contentSourcesSyncing'> <i class='fas fa-spinner fa-spin'></i> Loading content from sources...</span>
+                    <span class="pull-right text-info" ng-show='!contentSourcesSyncing && ! hasPrograms() && (tab != "programming")'> <i class='fas fa-info-circle'></i> Use the &quot;Programming&quot; tab or check Content Sources on Properties, then save.</span>
                     <div class="text-right">
-                        <button class="btn btn-sm btn-link" ng-click="_onDone()">
+                        <button class="btn btn-sm btn-link" ng-click="_onDone()" ng-disabled="contentSourcesSyncing">
                             Cancel
                         </button>
-                        <button class="btn btn-sm btn-primary" ng-click="_onDone(channel)" ng-disabled='! hasPrograms()'>
+                        <button class="btn btn-sm btn-primary" ng-click="_onDone(channel)" ng-disabled='! hasPrograms() || contentSourcesSyncing'>
                             {{ isNewChannel ? 'Add Channel' : 'Update Channel' }}
                         </button>
                     </div>

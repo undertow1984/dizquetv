@@ -72,6 +72,6 @@
         "refresh_timer": "Refresh Timer (hours)",
         "refresh_timer_note": "How often should the xmltv file be updated.",
         "image_cache": "Image Cache",
-        "image_cache_note": "If enabled the pictures used for Movie and TV Show posters will be cached in dizqueTV's .dizqueTV folder and will be delivered by dizqueTV's server instead of requiring calls to Plex. Note that using fixed xmltv location in Plex (as opposed to url) will not work correctly in this case."
+        "image_cache_note": "If enabled, movie/TV posters and external channel logos are cached and served by dizqueTV instead of the original host. This often fixes missing logos in Plex on Google TV / Android TV (while Plex Web still worked). Use the XMLTV URL in Plex (not a fixed local file path) so logo hosts resolve correctly."
     }
 }

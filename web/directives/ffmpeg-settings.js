@@ -1,4 +1,4 @@
-module.exports = function (dizquetv, resolutionOptions) {
+module.exports = function (dizquetv, resolutionOptions, $timeout) {
     return {
         restrict: 'E',
         templateUrl: 'templates/ffmpeg-settings.html',
@@ -7,11 +7,60 @@ module.exports = function (dizquetv, resolutionOptions) {
         },
         link: function (scope, element, attrs) {
             //add validations to ffmpeg settings, speciall commas in codec name
+            scope.watermarkApplyPending = false;
+            scope.watermarkApplyStatus = "";
+            scope.watermarkApplyError = "";
+
             dizquetv.getFfmpegSettings().then((settings) => {
+                if (typeof settings.enableChannelWatermarkGlobally === 'undefined') {
+                    settings.enableChannelWatermarkGlobally = false;
+                }
+                if (typeof settings.preferredLanguage === 'undefined' || settings.preferredLanguage === null || settings.preferredLanguage === '') {
+                    settings.preferredLanguage = 'eng';
+                }
+                if (typeof settings.subtitleMode === 'undefined' || !settings.subtitleMode) {
+                    // Migrate legacy checkbox
+                    settings.subtitleMode = (settings.includeSubtitles === true) ? 'soft_burn' : 'off';
+                }
+                if (typeof settings.includeSubtitles === 'undefined') {
+                    settings.includeSubtitles = (settings.subtitleMode !== 'off');
+                }
+                if (typeof settings.enableHdrToneMapping === 'undefined') {
+                    settings.enableHdrToneMapping = false;
+                }
+                if (typeof settings.hdrToneMappingAlgorithm === 'undefined' || !settings.hdrToneMappingAlgorithm) {
+                    settings.hdrToneMappingAlgorithm = 'hable';
+                }
+                if (typeof settings.transcodingSpeed === 'undefined' || !settings.transcodingSpeed) {
+                    settings.transcodingSpeed = 'veryfast';
+                }
+                if (typeof settings.hardwareDecode === 'undefined' || !settings.hardwareDecode) {
+                    settings.hardwareDecode = 'none';
+                }
+                if (typeof settings.hardwareDecodeDevice === 'undefined' || settings.hardwareDecodeDevice === null) {
+                    settings.hardwareDecodeDevice = '';
+                }
+                if (typeof settings.hwAccelExtraFrames === 'undefined' || settings.hwAccelExtraFrames === null) {
+                    settings.hwAccelExtraFrames = 8;
+                }
+                if (typeof settings.streamMode === 'undefined' || !settings.streamMode) {
+                    settings.streamMode = 'mpegts';
+                }
+                if (typeof settings.hlsDirectContainer === 'undefined' || !settings.hlsDirectContainer) {
+                    settings.hlsDirectContainer = 'mpegts';
+                }
+                if (typeof settings.disablePreludes === 'undefined') {
+                    settings.disablePreludes = false;
+                }
+                if (typeof settings.logFfmpeg === 'undefined') {
+                    settings.logFfmpeg = false;
+                }
                 scope.settings = settings
             })
             scope.updateSettings = (settings) => {
                 delete scope.settingsError;
+                scope.watermarkApplyStatus = "";
+                scope.watermarkApplyError = "";
                 dizquetv.updateFfmpegSettings(settings).then((_settings) => {
                     scope.settings = _settings
                 }).catch( (err) => {
@@ -21,9 +70,34 @@ module.exports = function (dizquetv, resolutionOptions) {
                 })
             }
             scope.resetSettings = (settings) => {
+                scope.watermarkApplyStatus = "";
+                scope.watermarkApplyError = "";
                 dizquetv.resetFfmpegSettings(settings).then((_settings) => {
                     scope.settings = _settings
                 })
+            }
+            scope.enableWatermarksOnAllChannels = async () => {
+                if (scope.watermarkApplyPending) {
+                    return;
+                }
+                if (!confirm("Enable the Channel Watermark checkbox on all existing channels?")) {
+                    return;
+                }
+                scope.watermarkApplyPending = true;
+                scope.watermarkApplyStatus = "";
+                scope.watermarkApplyError = "";
+                $timeout();
+                try {
+                    let result = await dizquetv.enableWatermarksOnAllChannels();
+                    let n = (result && typeof result.updated === 'number') ? result.updated : 0;
+                    scope.watermarkApplyStatus = "Enabled watermark on " + n + " channel(s).";
+                } catch (err) {
+                    console.error(err);
+                    scope.watermarkApplyError = "Failed to enable watermarks on all channels.";
+                } finally {
+                    scope.watermarkApplyPending = false;
+                    $timeout();
+                }
             }
             scope.isTranscodingNotNeeded = () => {
                 return (typeof(scope.settings) ==='undefined') || ! (scope.settings.enableFFMPEGTranscoding);
@@ -40,6 +114,42 @@ module.exports = function (dizquetv, resolutionOptions) {
                 {id:"4",description:"4 Seconds"},
                 {id:"5",description:"5 Seconds"},
                 {id:"10",description:"10 Seconds"},
+            ];
+            // Tunarr-aligned stream modes (see docs/configure/channels/transcoding.md)
+            scope.streamModeOptions = [
+                {id: "mpegts", description: "MPEG-TS (classic dizqueTV / HDHR)"},
+                {id: "hls", description: "HLS (recommended for IPTV clients)"},
+                {id: "hls_slower", description: "HLS alt (stronger normalize, more CPU)"},
+                {id: "hls_direct", description: "HLS Direct (remux current program, minimal process)"},
+                {id: "hls_direct_v2", description: "HLS Direct v2 (continuous playlist, prefer remux)"},
+            ];
+            scope.hlsDirectContainerOptions = [
+                {id: "mpegts", description: "MPEG-TS"},
+                {id: "mkv", description: "Matroska (MKV)"},
+                {id: "mp4", description: "MP4"},
+            ];
+            // FFmpeg libx264-style presets (slow → fast). Also mapped for NVENC/QSV in ffmpeg.js.
+            scope.transcodingSpeedOptions = [
+                {id: "veryslow", description: "Very Slow (best quality)"},
+                {id: "slower", description: "Slower"},
+                {id: "slow", description: "Slow"},
+                {id: "medium", description: "Medium"},
+                {id: "fast", description: "Fast"},
+                {id: "faster", description: "Faster"},
+                {id: "veryfast", description: "Very Fast (recommended for live)"},
+                {id: "superfast", description: "Super Fast"},
+                {id: "ultrafast", description: "Ultra Fast (lowest CPU)"},
+            ];
+            // FFmpeg -hwaccel values (decode only; frames still hit CPU filters)
+            scope.hardwareDecodeOptions = [
+                {id: "none", description: "None (software decode)"},
+                {id: "auto", description: "Auto (from video encoder: cuda/qsv/d3d11/…)"},
+                {id: "cuda", description: "CUDA (NVIDIA — recommended with NVENC)"},
+                {id: "qsv", description: "Intel Quick Sync (QSV)"},
+                {id: "d3d11va", description: "D3D11VA (Windows)"},
+                {id: "dxva2", description: "DXVA2 (Windows, older)"},
+                {id: "vaapi", description: "VAAPI (Linux)"},
+                {id: "videotoolbox", description: "VideoToolbox (macOS)"},
             ];
             scope.errorScreens = [
                 {value:"pic", description:"images/generic-error-screen.png"},
@@ -78,6 +188,46 @@ module.exports = function (dizquetv, resolutionOptions) {
                 {value: "w3fdif", description: "w3fdif"},
                 {value: "yadif=0", description: "yadif send frame"},
                 {value: "yadif=1", description: "yadif send field"}
+            ];
+            scope.hdrToneMapOptions = [
+                {id: "hable", description: "hable (default, balanced)"},
+                {id: "bt2390", description: "bt2390 (HDR10 PQ)"},
+                {id: "reinhard", description: "reinhard"},
+                {id: "mobius", description: "mobius"},
+                {id: "gamma", description: "gamma"},
+                {id: "linear", description: "linear"},
+                {id: "clip", description: "clip"},
+            ];
+            scope.subtitleModeOptions = [
+                {id: "off", description: "Off (no subtitles)"},
+                {id: "soft", description: "Soft only (PGS / image tracks — toggleable when client supports)"},
+                {id: "soft_burn", description: "Soft + burn text (image soft-map; SRT/ASS burned always-on)"},
+            ];
+            scope.languageOptions = [
+                {id: "eng", description: "English (eng)"},
+                {id: "spa", description: "Spanish (spa)"},
+                {id: "fre", description: "French (fre)"},
+                {id: "ger", description: "German (ger)"},
+                {id: "ita", description: "Italian (ita)"},
+                {id: "por", description: "Portuguese (por)"},
+                {id: "rus", description: "Russian (rus)"},
+                {id: "jpn", description: "Japanese (jpn)"},
+                {id: "kor", description: "Korean (kor)"},
+                {id: "chi", description: "Chinese (chi)"},
+                {id: "zho", description: "Chinese (zho)"},
+                {id: "nld", description: "Dutch (nld)"},
+                {id: "swe", description: "Swedish (swe)"},
+                {id: "nor", description: "Norwegian (nor)"},
+                {id: "dan", description: "Danish (dan)"},
+                {id: "fin", description: "Finnish (fin)"},
+                {id: "pol", description: "Polish (pol)"},
+                {id: "tur", description: "Turkish (tur)"},
+                {id: "ara", description: "Arabic (ara)"},
+                {id: "hin", description: "Hindi (hin)"},
+                {id: "heb", description: "Hebrew (heb)"},
+                {id: "tha", description: "Thai (tha)"},
+                {id: "vie", description: "Vietnamese (vie)"},
+                {id: "und", description: "Undefined (und)"},
             ];
 
         }

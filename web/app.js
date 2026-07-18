@@ -55,6 +55,7 @@ app.directive('removeShows',  require('./directives/remove-shows'))
 app.directive('channelRedirect',  require('./directives/channel-redirect'))
 app.directive('plexServerEdit',  require('./directives/plex-server-edit'))
 app.directive('channelConfig',  require('./directives/channel-config'))
+app.directive('bulkChannelImport',  require('./directives/bulk-channel-import'))
 app.directive('timeSlotsScheduleEditor',  require('./directives/time-slots-schedule-editor'))
 app.directive('randomSlotsScheduleEditor',  require('./directives/random-slots-schedule-editor'))
 

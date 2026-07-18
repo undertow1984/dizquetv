@@ -1,4 +1,4 @@
-module.exports = function ($timeout, $location, dizquetv, resolutionOptions, getShowData, commonProgramTools) {
+module.exports = function ($timeout, $location, dizquetv, plex, resolutionOptions, getShowData, commonProgramTools) {
     return {
         restrict: 'E',
         templateUrl: 'templates/channel-config.html',
@@ -53,14 +53,17 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
             if (typeof scope.channel === 'undefined' || scope.channel == null) {
                 scope.channel = {}
                 scope.channel.programs = []
-                scope.channel.watermark = defaultWatermark();
+                scope.channel.watermark = defaultWatermark(false);
                 scope.channel.fillerCollections = []
+                scope.channel.contentSources = []
                 scope.channel.guideFlexPlaceholder = "";
                 scope.channel.fillerRepeatCooldown = 30 * 60 * 1000;
                 scope.channel.fallback = [];
                 scope.channel.guideMinimumDurationSeconds = 5 * 60;
                 scope.isNewChannel = true
-                scope.channel.icon = `${$location.protocol()}://${location.host}/images/dizquetv.png`
+                // Prefer relative paths so XMLTV/M3U can rewrite to the host Plex actually used
+                // (avoids localhost logos that work in Plex Web but fail on Google TV)
+                scope.channel.icon = `/images/dizquetv.png`
                 scope.channel.groupTitle = "dizqueTV";
                 scope.channel.disableFillerOverlay = true;
                 scope.channel.iconWidth = 120
@@ -69,7 +72,7 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
                 scope.channel.startTime = new Date()
                 scope.channel.startTime.setMilliseconds(0)
                 scope.channel.startTime.setSeconds(0)
-                scope.channel.offlinePicture = `${$location.protocol()}://${location.host}/images/generic-offline-screen.png`
+                scope.channel.offlinePicture = `/images/generic-offline-screen.png`
                 scope.channel.offlineSoundtrack = ''
                 scope.channel.offlineMode = "pic";
                 if (scope.channel.startTime.getMinutes() < 30)
@@ -91,8 +94,26 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
                     isOnDemand : false,
                     modulo: 1,
                 }
+                // Honor global default: enable watermark on new channels when set in FFmpeg settings
+                // (unless Disable Channel Watermark Globally is also checked)
+                dizquetv.getFfmpegSettings().then((ffmpegSettings) => {
+                    if (
+                        ffmpegSettings
+                        && ffmpegSettings.enableChannelWatermarkGlobally === true
+                        && ffmpegSettings.disableChannelOverlay !== true
+                    ) {
+                        scope.channel.watermark.enabled = true;
+                        $timeout();
+                    }
+                }).catch((err) => {
+                    console.error("Could not load ffmpeg settings for watermark default.", err);
+                });
             } else {
                 scope.beforeEditChannelNumber = scope.channel.number
+
+                if (typeof(scope.channel.contentSources) === 'undefined' || !Array.isArray(scope.channel.contentSources)) {
+                    scope.channel.contentSources = [];
+                }
 
                 if (
                     (typeof(scope.channel.watermark) === 'undefined')
@@ -163,9 +184,354 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
                 setTimeout( () => { scope.showRotatedNote = true }, 1, 'funky');
             }
 
-            function defaultWatermark() {
+            if (typeof(scope.channel.contentSources) === 'undefined' || !Array.isArray(scope.channel.contentSources)) {
+                scope.channel.contentSources = [];
+            }
+
+            // ---- Content sources (Plex playlists / collections) ----
+            scope.contentSourcePlaylists = [];
+            scope.contentSourceCollections = [];
+            scope.contentSourceShows = [];
+            scope.contentSourcePlaylistFilter = "";
+            scope.contentSourceCollectionFilter = "";
+            scope.contentSourceShowFilter = "";
+            scope.contentSourcesLoading = false;
+            scope.contentSourcesError = "";
+            scope.contentSourcesSyncing = false;
+            scope.contentSourcesSyncStatus = "";
+
+            function contentSourceId(src) {
+                return (src.serverName || "") + "\0" + (src.type || "") + "\0" + (src.key || "");
+            }
+
+            function isContentSourceSynced(item) {
+                if (!scope.channel.contentSources) {
+                    return false;
+                }
+                let id = contentSourceId(item);
+                for (let i = 0; i < scope.channel.contentSources.length; i++) {
+                    if (contentSourceId(scope.channel.contentSources[i]) === id) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            scope.isContentSourceSynced = isContentSourceSynced;
+
+            function catalogItemToSource(item) {
+                // Preserve lastSyncedAt if this source was already linked
+                let prev = null;
+                let id = contentSourceId(item);
+                let list = scope.channel.contentSources || [];
+                for (let i = 0; i < list.length; i++) {
+                    if (contentSourceId(list[i]) === id) {
+                        prev = list[i];
+                        break;
+                    }
+                }
                 return {
-                    enabled: false,
+                    type: item.type,
+                    key: item.key,
+                    title: item.title,
+                    serverName: item.serverName,
+                    collectionType: item.collectionType || null,
+                    libraryTitle: item.libraryTitle || null,
+                    lastSyncedAt: prev && prev.lastSyncedAt ? prev.lastSyncedAt : null,
+                };
+            }
+
+            /** Rebuild channel.contentSources from catalog checkbox state (item.selected). */
+            function syncContentSourcesFromCatalog() {
+                let selected = [];
+                let lists = [
+                    scope.contentSourcePlaylists || [],
+                    scope.contentSourceCollections || [],
+                    scope.contentSourceShows || [],
+                ];
+                for (let L = 0; L < lists.length; L++) {
+                    for (let i = 0; i < lists[L].length; i++) {
+                        let item = lists[L][i];
+                        if (item.selected) {
+                            selected.push(catalogItemToSource(item));
+                        }
+                    }
+                }
+                scope.channel.contentSources = selected;
+                return selected;
+            }
+
+            scope.onContentSourceCheckChange = () => {
+                // Keep channel.contentSources in sync as user toggles checkboxes
+                syncContentSourcesFromCatalog();
+            };
+
+            scope.contentSourceSelectedCount = () => {
+                // Prefer live checkbox state so count updates even before sync
+                let n = 0;
+                let lists = [
+                    scope.contentSourcePlaylists || [],
+                    scope.contentSourceCollections || [],
+                    scope.contentSourceShows || [],
+                ];
+                for (let L = 0; L < lists.length; L++) {
+                    for (let i = 0; i < lists[L].length; i++) {
+                        if (lists[L][i].selected) {
+                            n++;
+                        }
+                    }
+                }
+                return n;
+            };
+
+            scope.loadContentSourceCatalog = async () => {
+                scope.contentSourcesLoading = true;
+                scope.contentSourcesError = "";
+                scope.contentSourcePlaylists = [];
+                scope.contentSourceCollections = [];
+                scope.contentSourceShows = [];
+                $timeout();
+                try {
+                    let servers = await dizquetv.getPlexServers();
+                    if (!servers || servers.length === 0) {
+                        scope.contentSourcesError = "No Plex servers configured.";
+                        return;
+                    }
+                    let playlists = [];
+                    let collections = [];
+                    let shows = [];
+                    let sortByTitle = (a, b) => {
+                        let ta = (a.title || "").toString();
+                        let tb = (b.title || "").toString();
+                        return ta.localeCompare(tb, undefined, { sensitivity: 'base', numeric: true });
+                    };
+                    for (let s = 0; s < servers.length; s++) {
+                        let server = servers[s];
+                        try {
+                            let play = await plex.getPlaylists(server);
+                            for (let i = 0; i < play.length; i++) {
+                                let p = play[i];
+                                let item = {
+                                    type: "playlist",
+                                    key: p.key,
+                                    title: p.title,
+                                    serverName: server.name,
+                                    count: p.count,
+                                    collectionType: null,
+                                    libraryTitle: null,
+                                };
+                                item.selected = isContentSourceSynced(item);
+                                playlists.push(item);
+                            }
+                        } catch (err) {
+                            console.error(err);
+                            scope.contentSourcesError = (scope.contentSourcesError ? scope.contentSourcesError + " " : "")
+                                + "Failed playlists from " + server.name + ".";
+                        }
+                        try {
+                            let cols = await plex.getCollections(server);
+                            for (let i = 0; i < cols.length; i++) {
+                                let c = cols[i];
+                                let item = {
+                                    type: "collection",
+                                    key: c.key,
+                                    title: c.title,
+                                    serverName: server.name,
+                                    count: c.count,
+                                    collectionType: c.collectionType || null,
+                                    libraryTitle: c.libraryTitle || null,
+                                };
+                                item.selected = isContentSourceSynced(item);
+                                collections.push(item);
+                            }
+                        } catch (err) {
+                            console.error(err);
+                            scope.contentSourcesError = (scope.contentSourcesError ? scope.contentSourcesError + " " : "")
+                                + "Failed collections from " + server.name + ".";
+                        }
+                        try {
+                            let tv = await plex.getShows(server);
+                            for (let i = 0; i < tv.length; i++) {
+                                let t = tv[i];
+                                let item = {
+                                    type: "show",
+                                    key: t.key,
+                                    title: t.title,
+                                    serverName: server.name,
+                                    count: t.count,
+                                    collectionType: null,
+                                    libraryTitle: t.libraryTitle || null,
+                                };
+                                item.selected = isContentSourceSynced(item);
+                                shows.push(item);
+                            }
+                        } catch (err) {
+                            console.error(err);
+                            scope.contentSourcesError = (scope.contentSourcesError ? scope.contentSourcesError + " " : "")
+                                + "Failed TV shows from " + server.name + ".";
+                        }
+                    }
+                    playlists.sort(sortByTitle);
+                    collections.sort(sortByTitle);
+                    shows.sort(sortByTitle);
+                    scope.contentSourcePlaylists = playlists;
+                    scope.contentSourceCollections = collections;
+                    scope.contentSourceShows = shows;
+                } catch (err) {
+                    console.error(err);
+                    scope.contentSourcesError = "Unable to load Plex playlists/collections/shows.";
+                } finally {
+                    scope.contentSourcesLoading = false;
+                    $timeout();
+                }
+            };
+
+            async function importProgramsFromSources(sources) {
+                let servers = await dizquetv.getPlexServers();
+                let serverByName = {};
+                for (let i = 0; i < (servers || []).length; i++) {
+                    serverByName[servers[i].name] = servers[i];
+                }
+                let programs = [];
+                let warnings = [];
+                for (let i = 0; i < sources.length; i++) {
+                    let src = sources[i];
+                    scope.contentSourcesSyncStatus = `Importing ${src.type} "${src.title}" (${i + 1}/${sources.length})...`;
+                    $timeout();
+                    let server = serverByName[src.serverName];
+                    if (!server) {
+                        warnings.push("Server not found: " + src.serverName);
+                        continue;
+                    }
+                    let item = {
+                        title: src.title,
+                        key: src.key,
+                        type: src.type,
+                        collectionType: src.collectionType,
+                    };
+                    let expandErrors = [];
+                    let more = await plex.expandToPrograms(server, item, expandErrors);
+                    if (expandErrors.length) {
+                        warnings = warnings.concat(expandErrors);
+                    }
+                    programs = programs.concat(more || []);
+                    src.lastSyncedAt = new Date().toISOString();
+                }
+                for (let p = 0; p < programs.length; p++) {
+                    if (typeof programs[p].commercials === 'undefined') {
+                        programs[p].commercials = [];
+                    }
+                }
+                return { programs: programs, warnings: warnings };
+            }
+
+            /**
+             * Same dedupe as Programming tab "Duplicates" button:
+             * commonProgramTools.removeDuplicates (no shuffle).
+             *
+             * Existing channel order is preserved: keep current programs in place,
+             * then append only source items that are not already on the channel.
+             * (First occurrence wins inside removeDuplicates.)
+             */
+            function mergeAndRemoveDuplicates(existingPrograms, sourcePrograms) {
+                let combined = (existingPrograms || []).concat(sourcePrograms || []);
+                return commonProgramTools.removeDuplicates(combined);
+            }
+
+            /**
+             * Import all linked content sources and merge with manual programming.
+             * Used on channel save when sources are selected.
+             */
+            async function applyContentSourcesToProgramming() {
+                // Ensure checkmarks are saved into contentSources first
+                let sources = syncContentSourcesFromCatalog();
+                if (sources.length === 0) {
+                    return { ok: true, programCount: scope.channel.programs.length, warnings: [] };
+                }
+                let existing = (scope.channel.programs || []).slice();
+                let imported = await importProgramsFromSources(sources);
+                if ((!imported.programs || imported.programs.length === 0) && existing.length === 0) {
+                    return {
+                        ok: false,
+                        error: "Selected content sources produced no playable items.",
+                        programCount: 0,
+                        warnings: imported.warnings,
+                    };
+                }
+                // Identical to Programming → Duplicates (commonProgramTools.removeDuplicates)
+                let programs = mergeAndRemoveDuplicates(existing, imported.programs || []);
+                if (programs.length === 0) {
+                    return {
+                        ok: false,
+                        error: "No programs left after syncing content sources.",
+                        programCount: 0,
+                        warnings: imported.warnings,
+                    };
+                }
+                scope.channel.programs = programs;
+                updateChannelDuration();
+                return {
+                    ok: true,
+                    programCount: programs.length,
+                    warnings: imported.warnings,
+                };
+            }
+
+            /**
+             * Refresh programming from selected:
+             * 1) Save checkbox selection as contentSources
+             * 2) Import content from sources and merge with existing programs
+             * 3) Remove duplicates exactly like Programming tab
+             */
+            scope.syncProgrammingFromContentSources = async () => {
+                if (scope.contentSourcesSyncing) {
+                    return;
+                }
+                scope.contentSourcesSyncing = true;
+                scope.contentSourcesSyncStatus = "Saving selected sources...";
+                $timeout();
+                try {
+                    // 1) Persist checkmarks as content sources on the channel
+                    let sources = syncContentSourcesFromCatalog();
+                    if (sources.length === 0) {
+                        scope.contentSourcesSyncStatus = "Select at least one playlist, collection, or TV show.";
+                        return;
+                    }
+
+                    scope.contentSourcesSyncStatus = `Refreshing content from ${sources.length} source(s)...`;
+                    $timeout();
+
+                    let existing = (scope.channel.programs || []).slice();
+                    let imported = await importProgramsFromSources(sources);
+                    let programs = mergeAndRemoveDuplicates(existing, imported.programs || []);
+                    if (programs.length === 0) {
+                        scope.contentSourcesSyncStatus = "Selected sources produced no playable items.";
+                        return;
+                    }
+                    scope.channel.programs = programs;
+                    updateChannelDuration();
+
+                    let warn = (imported.warnings && imported.warnings.length)
+                        ? (" " + imported.warnings.join(" "))
+                        : "";
+                    scope.contentSourcesSyncStatus =
+                        `Saved ${sources.length} source(s) → ${programs.length} program(s)` +
+                        ` (duplicates removed, same as Programming tools).` + warn;
+                } catch (err) {
+                    console.error(err);
+                    scope.contentSourcesSyncStatus = "Failed to sync programming from sources.";
+                } finally {
+                    scope.contentSourcesSyncing = false;
+                    $timeout();
+                }
+            };
+
+            // Load catalog for the Properties tab lists
+            scope.loadContentSourceCatalog();
+
+            function defaultWatermark(enabled) {
+                return {
+                    enabled: enabled === true,
                     position: "bottom-right",
                     width: 10.00,
                     verticalMargin: 0.00,
@@ -795,6 +1161,12 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
                 commonProgramTools.shuffle(scope.channel.programs);
                 updateChannelDuration()
             }
+            scope.shuffleInOrder = () => {
+                // Interleave shows randomly but keep each show's episodes in air order
+                // (S01E01 before S01E02 the next time that show airs).
+                commonProgramTools.shuffleInOrder(scope.channel.programs);
+                updateChannelDuration();
+            }
             scope.cyclicShuffle = () => {
                 // cyclic shuffle can be reproduced by simulating the effects
                 // of save and recover positions.
@@ -982,6 +1354,55 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
                     await scope.onDone()
                     $timeout();
                 } else {
+                    // When content sources are linked, rebuild programming from them on save
+                    // (add all source content, remove duplicates, randomize order)
+                    if (
+                        channel.contentSources
+                        && channel.contentSources.length > 0
+                        && !scope.contentSourcesSyncing
+                    ) {
+                        scope.contentSourcesSyncing = true;
+                        scope.contentSourcesSyncStatus = "Updating programming from content sources...";
+                        scope.error = {};
+                        $timeout();
+                        try {
+                            let result = await applyContentSourcesToProgramming();
+                            if (!result.ok) {
+                                scope.error.any = true;
+                                scope.error.programs = result.error || "Failed to load content from selected sources.";
+                                scope.error.tab = "basic";
+                                scope.contentSourcesSyncStatus = scope.error.programs;
+                                scope.contentSourcesSyncing = false;
+                                $timeout();
+                                $timeout(() => { scope.error = {} }, 60000);
+                                return;
+                            }
+                            // Keep the object passed to save in sync with scope.channel
+                            channel.programs = scope.channel.programs;
+                            channel.duration = scope.channel.duration;
+                            channel.contentSources = scope.channel.contentSources;
+                            if (result.warnings && result.warnings.length) {
+                                scope.contentSourcesSyncStatus =
+                                    `Loaded ${result.programCount} program(s) with warnings. Saving...`;
+                            } else {
+                                scope.contentSourcesSyncStatus =
+                                    `Loaded ${result.programCount} program(s) (duplicates removed). Saving...`;
+                            }
+                        } catch (err) {
+                            console.error(err);
+                            scope.error.any = true;
+                            scope.error.programs = "Failed to load content from selected sources.";
+                            scope.error.tab = "basic";
+                            scope.contentSourcesSyncStatus = scope.error.programs;
+                            scope.contentSourcesSyncing = false;
+                            $timeout();
+                            $timeout(() => { scope.error = {} }, 60000);
+                            return;
+                        }
+                        scope.contentSourcesSyncing = false;
+                        $timeout();
+                    }
+
                     channelNumbers = []
                     for (let i = 0, l = scope.channels.length; i < l; i++)
                         channelNumbers.push(scope.channels[i].number)
@@ -1197,7 +1618,12 @@ module.exports = function ($timeout, $location, dizquetv, resolutionOptions, get
             }
 
             scope.hasPrograms = () => {
-                return scope.channel.programs.length > 0;
+                // Allow save when programs exist OR content sources are selected
+                // (sources are applied automatically on Update Channel)
+                if (scope.channel.programs && scope.channel.programs.length > 0) {
+                    return true;
+                }
+                return scope.channel.contentSources && scope.channel.contentSources.length > 0;
             }
 
             scope.showPlexLibrary = () => {

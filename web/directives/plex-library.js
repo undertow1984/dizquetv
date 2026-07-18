@@ -25,12 +25,117 @@ module.exports = function (plex, dizquetv, $timeout, commonProgramTools) {
                 scope.allowedIndexes.push(i);
             }
             scope.selection = []
+            scope.contentFilter = ""; // used for custom shows list
+            scope.movieLibraries = [];
+            scope.showLibraries = [];
+            scope.contentPanels = [
+                { title: "Movies", libraries: [], filter: "", emptyText: "No movie libraries found." },
+                { title: "TV Shows", libraries: [], filter: "", emptyText: "No TV show libraries found." },
+            ];
+
+            /** Case-insensitive match against common display fields. */
+            function textMatchesFilter(item, q) {
+                if (!item || !q) {
+                    return true;
+                }
+                let fields = [item.title, item.name, item.showTitle, item.year, item.type];
+                for (let i = 0; i < fields.length; i++) {
+                    if (fields[i] != null && String(fields[i]).toLowerCase().indexOf(q) !== -1) {
+                        return true;
+                    }
+                }
+                try {
+                    let display = scope.displayTitle(item);
+                    if (display && display.toLowerCase().indexOf(q) !== -1) {
+                        return true;
+                    }
+                } catch (e) { /* displayTitle may not handle every node */ }
+                return false;
+            }
+
+            /**
+             * Show an item if it matches the filter.
+             * @param {*} item
+             * @param {string} [filterText] optional panel-specific filter
+             * @param {boolean} [topLevelOnly] if true, only match this item's title (no nested search)
+             */
+            scope.itemMatchesFilter = function (item, filterText, topLevelOnly) {
+                // Never show collections in library browsers
+                if (item && item.type === 'collection') {
+                    return false;
+                }
+                let raw = (typeof filterText === 'string' ? filterText : scope.contentFilter) || "";
+                raw = raw.trim();
+                if (!raw) {
+                    return true;
+                }
+                let q = raw.toLowerCase();
+                if (textMatchesFilter(item, q)) {
+                    return true;
+                }
+                // TV panel: only search top-level show titles
+                if (topLevelOnly) {
+                    return false;
+                }
+                if (item && item.nested && item.nested.length) {
+                    for (let i = 0; i < item.nested.length; i++) {
+                        if (item.nested[i].type === 'collection') {
+                            continue;
+                        }
+                        if (scope.itemMatchesFilter(item.nested[i], filterText, false)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            /** Nested rows under a filtered top-level item (TV: always show children once expanded). */
+            scope.nestedMatchesFilter = function (item, panel) {
+                if (item && item.type === 'collection') {
+                    return false;
+                }
+                if (panel && panel.topLevelSearchOnly) {
+                    return true;
+                }
+                return scope.itemMatchesFilter(item, panel ? panel.filter : "", false);
+            };
+
+            scope.hasVisiblePanelItems = function (panel) {
+                if (!panel || !panel.libraries) {
+                    return false;
+                }
+                let topOnly = panel.topLevelSearchOnly === true;
+                for (let i = 0; i < panel.libraries.length; i++) {
+                    if (scope.itemMatchesFilter(panel.libraries[i], panel.filter, topOnly)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            let sortByTitle = (items) => {
+                if (!items || !items.length) {
+                    return items || [];
+                }
+                return items.slice().sort( (a, b) => {
+                    let ta = (a.title || a.name || "").toString();
+                    let tb = (b.title || b.name || "").toString();
+                    return ta.localeCompare(tb, undefined, { sensitivity: 'base', numeric: true });
+                } );
+            }
             scope.wait = (t) => {
                 return new Promise((resolve, reject) => {
                     $timeout(resolve,t);
                 });
             }
             scope.selectOrigin = function (origin) {
+                scope.contentFilter = "";
+                if (scope.contentPanels) {
+                    for (let i = 0; i < scope.contentPanels.length; i++) {
+                        scope.contentPanels[i].filter = "";
+                    }
+                }
                 if ( origin.type === 'plex' ) {
                     scope.plexServer = origin.server;
                     updateLibrary(scope.plexServer);
@@ -101,52 +206,194 @@ module.exports = function (plex, dizquetv, $timeout, commonProgramTools) {
                         "server": s,
                     }
                 } );
-                scope.currentOrigin = scope.origins[0];
-                scope.plexServer = scope.currentOrigin.server;
                 scope.origins.push( {
                     "type": "dizquetv",
                     "name" : "dizqueTV - Custom Shows",
                 } );
-                updateLibrary(scope.plexServer)
+                scope.origins.sort( (a, b) => {
+                    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+                } );
+                scope.currentOrigin = scope.origins[0];
+                scope.plexServer = scope.currentOrigin.server;
+                if (scope.currentOrigin.type === 'plex') {
+                    updateLibrary(scope.plexServer)
+                } else {
+                    updateCustomShows();
+                }
             })
 
             let updateLibrary = async(server) => {
                 let lib = await plex.getLibrary(server);
-                let play = await plex.getPlaylists(server);
+                let loadErrors = [];
 
-                play.forEach( p => {
-                    p.type = "playlist";
+                // Sort genres under each library if present
+                lib.forEach( (section) => {
+                    if (section.genres && section.genres.length) {
+                        section.genres = sortByTitle(section.genres);
+                    }
                 } );
-                        scope.$apply(() => {
-                            scope.libraries = lib
-                            if (play.length > 0)
-                                scope.libraries.push({ title: "Playlists", key: "", icon: "", nested: play })
-                        })
+                lib = sortByTitle(lib);
+
+                let movies = [];
+                let showLibraries = [];
+                for (let i = 0; i < lib.length; i++) {
+                    if (lib[i].type === 'movie') {
+                        // Movie side still uses library folders
+                        lib[i].isLibraryNode = true;
+                        movies.push(lib[i]);
+                    } else if (lib[i].type === 'show' || lib[i].type === 'artist') {
+                        showLibraries.push(lib[i]);
+                    } else {
+                        showLibraries.push(lib[i]);
+                    }
+                }
+
+                // TV side: flatten — list shows only (no library folders, no collections)
+                let flatShows = [];
+                for (let i = 0; i < showLibraries.length; i++) {
+                    let section = showLibraries[i];
+                    try {
+                        // includeCollections=false — collections excluded from browser
+                        let nested = await plex.getNested(server, section, false, loadErrors);
+                        nested = sortByTitle(nested || []);
+                        for (let j = 0; j < nested.length; j++) {
+                            let item = nested[j];
+                            if (item.type === 'collection') {
+                                continue;
+                            }
+                            item.isLibraryNode = false;
+                            if (!item.libraryTitle) {
+                                item.libraryTitle = section.title;
+                            }
+                            flatShows.push(item);
+                        }
+                    } catch (err) {
+                        console.error("Failed to load TV library " + section.title, err);
+                        loadErrors.push("Failed to load " + section.title);
+                    }
+                }
+                flatShows = sortByTitle(flatShows);
+
+                if (loadErrors.length) {
+                    scope.errors = (scope.errors || []).concat(loadErrors);
+                }
+
+                scope.$apply(() => {
+                    scope.movieLibraries = movies;
+                    scope.showLibraries = flatShows;
+                    // Keep legacy combined list for any other references
+                    scope.libraries = movies.concat(flatShows);
+                    scope.contentPanels = [
+                        {
+                            title: "Movies",
+                            libraries: movies,
+                            filter: "",
+                            searching: false,
+                            topLevelSearchOnly: false,
+                            emptyText: "No movie libraries found on this server.",
+                        },
+                        {
+                            title: "TV Shows",
+                            libraries: flatShows,
+                            filter: "",
+                            searching: false,
+                            topLevelSearchOnly: true,
+                            emptyText: "No TV shows found on this server.",
+                        },
+                    ];
+                })
 
             }
             scope.fillNestedIfNecessary = async (x, isLibrary) => {
                 if (typeof(x.nested) === 'undefined') {
-                    x.nested = await plex.getNested(scope.plexServer, x, isLibrary, scope.errors);
-                    if (x.type === "collection" && x.collectionType === "show") {
-                        let nested = x.nested;
-                        x.nested = [];
-                        for (let i = 0; i < nested.length; i++) {
-                            let subNested = await plex.getNested(scope.plexServer, nested[i], false, scope.errors);
-                            for (let j = 0; j < subNested.length; j++) {
-                                subNested[j].title = nested[i].title + " - " + subNested[j].title;
-                                x.nested.push( subNested[j] );
+                    // Never pull collections into the library browser
+                    x.nested = await plex.getNested(scope.plexServer, x, false, scope.errors);
+                    // Strip any collection entries defensively
+                    x.nested = (x.nested || []).filter((n) => n && n.type !== 'collection');
+                    x.nested = sortByTitle(x.nested);
+                }
+            }
+            /**
+             * Movies panel: load nested so search can match movies inside libraries.
+             * TV panel: top-level only — shows are already flat; do not deep-search seasons/episodes.
+             */
+            scope.onPanelFilterChange = async function (panel) {
+                let q = (panel.filter || "").trim();
+                if (!q) {
+                    $timeout();
+                    return;
+                }
+                if (!scope.plexServer) {
+                    return;
+                }
+                // TV: only filter top-level show titles (already loaded flat)
+                if (panel.topLevelSearchOnly) {
+                    $timeout();
+                    return;
+                }
+                panel.searching = true;
+                $timeout();
+                try {
+                    for (let i = 0; i < panel.libraries.length; i++) {
+                        let lib = panel.libraries[i];
+                        let asLibrary = lib.isLibraryNode === true;
+                        await scope.fillNestedIfNecessary(lib, asLibrary);
+                        // Auto-expand movie libraries when contents match
+                        if (scope.itemMatchesFilter(lib, panel.filter, false)) {
+                            let selfMatch = textMatchesFilter(lib, q.toLowerCase());
+                            let childMatch = false;
+                            if (lib.nested && lib.nested.length) {
+                                for (let c = 0; c < lib.nested.length; c++) {
+                                    if (lib.nested[c].type === 'collection') {
+                                        continue;
+                                    }
+                                    if (scope.itemMatchesFilter(lib.nested[c], panel.filter, false)) {
+                                        childMatch = true;
+                                    }
+                                }
+                            }
+                            if (childMatch || selfMatch) {
+                                lib.collapse = true;
                             }
                         }
                     }
+                } catch (err) {
+                    console.error("Filter load failed", err);
+                } finally {
+                    panel.searching = false;
+                    $timeout();
                 }
-            }
+            };
+
+            /** Expand a node; library folders use isLibraryNode, shows/playlists do not. */
             scope.getNested = (list, isLibrary) => {
+                if (typeof isLibrary === 'undefined') {
+                    isLibrary = list && list.isLibraryNode === true;
+                }
                 $timeout(async () => {
                     await scope.fillNestedIfNecessary(list, isLibrary);
+                    // After load, keep expanded state; filter still applies via ng-if
                     list.collapse = !list.collapse
                     scope.$apply()
                 }, 0)
             }
+
+            scope.selectTopLevelItem = async (item) => {
+                if (!item) {
+                    return;
+                }
+                if (item.isLibraryNode) {
+                    return scope.selectLibrary(item);
+                }
+                if (item.type === 'playlist') {
+                    return scope.selectPlaylist(item);
+                }
+                if (item.type === 'movie') {
+                    return scope.selectItem(item, true);
+                }
+                // show, collection, artist, etc.
+                return scope.selectShow(item);
+            };
             
             scope.selectSeason = (season) => {
                 return new Promise((resolve, reject) => {
@@ -229,7 +476,8 @@ module.exports = function (plex, dizquetv, $timeout, commonProgramTools) {
             }
 
             let updateCustomShows = async() => {
-                scope.customShows = await dizquetv.getAllShowsInfo();
+                let shows = await dizquetv.getAllShowsInfo();
+                scope.customShows = sortByTitle(shows);
                 scope.$apply();
             }
 
