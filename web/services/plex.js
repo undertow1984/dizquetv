@@ -152,6 +152,17 @@ module.exports = function ($http, $window, $interval, dizquetv) {
          */
         getLibrary: async (server, options) => {
             options = options || {};
+            // Prefer local cache when available (management can force live with preferLive)
+            if (!options.preferLive) {
+                try {
+                    let cached = await dizquetv.getPlexCacheSections(server.name, !!options.includeDisabled);
+                    // fromCache is authoritative (empty list = all disabled / no sections)
+                    if (cached && cached.fromCache && Array.isArray(cached.sections)) {
+                        return cached.sections;
+                    }
+                } catch (e) { /* fall through to live Plex */ }
+            }
+
             var client = new Plex(server)
             const res = await client.Get('/library/sections')
             var sections = []
@@ -164,16 +175,18 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                     }
                     var genres = []
                     if (res.Directory[i].type === 'movie') {
-                        const genresRes = await client.Get(`/library/sections/${res.Directory[i].key}/genre`)
-                        for (let q = 0, k = typeof genresRes.Directory !== 'undefined' ? genresRes.Directory.length : 0; q < k; q++) {
-                            if (genresRes.Directory[q].type === 'genre') {
-                                genres.push({
-                                    title: 'Genre: ' + genresRes.Directory[q].title,
-                                    key: genresRes.Directory[q].fastKey,
-                                    type: 'genre'
-                                })
+                        try {
+                            const genresRes = await client.Get(`/library/sections/${res.Directory[i].key}/genre`)
+                            for (let q = 0, k = typeof genresRes.Directory !== 'undefined' ? genresRes.Directory.length : 0; q < k; q++) {
+                                if (genresRes.Directory[q].type === 'genre') {
+                                    genres.push({
+                                        title: 'Genre: ' + genresRes.Directory[q].title,
+                                        key: genresRes.Directory[q].fastKey,
+                                        type: 'genre'
+                                    })
+                                }
                             }
-                        }
+                        } catch (e) { /* ignore genres */ }
                     }
 
                     sections.push({
@@ -189,6 +202,14 @@ module.exports = function ($http, $window, $interval, dizquetv) {
             return sections
         },
         getPlaylists: async (server) => {
+            try {
+                let cached = await dizquetv.getPlexCachePlaylists(server.name);
+                // fromCache true only when playlists.json was synced (empty list is valid)
+                if (cached && cached.fromCache && Array.isArray(cached.playlists)) {
+                    return cached.playlists;
+                }
+            } catch (e) { /* fall through */ }
+
             var client = new Plex(server)
             const res = await client.Get('/playlists')
             var playlists = []
@@ -201,6 +222,7 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                     playlists.push({
                         title: res.Metadata[i].title,
                         key: res.Metadata[i].key,
+                        type: 'playlist',
                         icon: `${server.uri}${res.Metadata[i].composite}?X-Plex-Token=${server.accessToken}`,
                         duration: res.Metadata[i].duration,
                         // leafCount = items in playlist (movies/episodes/tracks)
@@ -210,6 +232,14 @@ module.exports = function ($http, $window, $interval, dizquetv) {
             return playlists
         },
         getCollections: async (server) => {
+            try {
+                let cached = await dizquetv.getPlexCacheCollections(server.name);
+                // fromCache true when any library was synced (empty collections is valid)
+                if (cached && cached.fromCache && Array.isArray(cached.collections)) {
+                    return cached.collections;
+                }
+            } catch (e) { /* fall through */ }
+
             var client = new Plex(server)
             const res = await client.Get('/library/sections')
             var collections = []
@@ -254,7 +284,16 @@ module.exports = function ($http, $window, $interval, dizquetv) {
          * Same shape as playlists/collections for bulk import & content sources.
          */
         getShows: async (server) => {
-            let sections = await exported.getLibrary(server);
+            try {
+                let cached = await dizquetv.getPlexCacheShows(server.name);
+                // fromCache true only when a show library was synced (empty list is valid)
+                if (cached && cached.fromCache && Array.isArray(cached.shows)) {
+                    return cached.shows;
+                }
+            } catch (e) { /* fall through */ }
+
+            // Live fallback: force live sections so a movies-only cache cannot hide unsynced TV libraries
+            let sections = await exported.getLibrary(server, { preferLive: true });
             let shows = [];
             let errors = [];
             for (let i = 0; i < sections.length; i++) {
@@ -269,6 +308,13 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                         if (!item || item.type !== 'show') {
                             continue;
                         }
+                        // Plex: childCount ≈ seasons, leafCount ≈ episodes
+                        let seasonCount = (typeof item.childCount !== 'undefined' && item.childCount !== null)
+                            ? parseInt(item.childCount, 10) : null;
+                        let episodeCount = (typeof item.leafCount !== 'undefined' && item.leafCount !== null)
+                            ? parseInt(item.leafCount, 10) : null;
+                        if (seasonCount !== null && isNaN(seasonCount)) seasonCount = null;
+                        if (episodeCount !== null && isNaN(episodeCount)) episodeCount = null;
                         shows.push({
                             title: item.title,
                             key: item.key,
@@ -276,10 +322,10 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                             libraryTitle: section.title,
                             icon: item.icon || "",
                             ratingKey: item.ratingKey,
-                            // childCount when Plex provides it on the metadata object
-                            count: (typeof item.childCount !== 'undefined')
-                                ? item.childCount
-                                : (typeof item.leafCount !== 'undefined' ? item.leafCount : null),
+                            seasonCount: seasonCount,
+                            episodeCount: episodeCount,
+                            count: episodeCount != null ? episodeCount
+                                : (seasonCount != null ? seasonCount : null),
                         });
                     }
                 } catch (err) {
@@ -302,6 +348,7 @@ module.exports = function ($http, $window, $interval, dizquetv) {
         },
         /**
          * Recursively expand a playlist/collection/show/season into playable programs.
+         * Prefers cache (via getNested) and any pre-attached children from cache lists.
          */
         expandToPrograms: async function expandToPrograms(server, item, errors) {
             if (!item) {
@@ -312,6 +359,7 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                 delete copy.server;
                 delete copy.nested;
                 delete copy.collapse;
+                delete copy.children;
                 copy.serverKey = server.name;
                 if (typeof copy.commercials === 'undefined') {
                     copy.commercials = [];
@@ -320,15 +368,20 @@ module.exports = function ($http, $window, $interval, dizquetv) {
             }
 
             let nested = [];
-            try {
-                nested = await exported.getNested(server, item, false, errors || []);
-            } catch (err) {
-                let msg = "Unable to load items for " + (item.title || item.key);
-                if (errors) {
-                    errors.push(msg);
+            // Children pre-attached from cache list APIs (collections/playlists)
+            if (Object.prototype.hasOwnProperty.call(item, 'children') && Array.isArray(item.children)) {
+                nested = item.children;
+            } else {
+                try {
+                    nested = await exported.getNested(server, item, false, errors || []);
+                } catch (err) {
+                    let msg = "Unable to load items for " + (item.title || item.key);
+                    if (errors) {
+                        errors.push(msg);
+                    }
+                    console.error(msg, err);
+                    return [];
                 }
-                console.error(msg, err);
-                return [];
             }
 
             let result = [];
@@ -339,8 +392,33 @@ module.exports = function ($http, $window, $interval, dizquetv) {
             return result;
         },
         getNested: async (server, lib, includeCollections, errors) => {
-            var client = new Plex(server)
             const key = lib.key
+            // Prefer children already loaded from cache (playlist/collection expand)
+            if (Object.prototype.hasOwnProperty.call(lib, 'children') && Array.isArray(lib.children)) {
+                let nested = lib.children.slice();
+                for (let i = 0; i < nested.length; i++) {
+                    if (nested[i] && !nested[i].server) {
+                        nested[i].server = server;
+                    }
+                }
+                return nested;
+            }
+            // Prefer local disk cache when available
+            try {
+                let cached = await dizquetv.getPlexCacheNested(server.name, key, includeCollections === true);
+                if (cached && cached.fromCache && Array.isArray(cached.nested)) {
+                    let nested = cached.nested.slice();
+                    // Attach server for UI expansion paths that expect it
+                    for (let i = 0; i < nested.length; i++) {
+                        if (nested[i] && !nested[i].server) {
+                            nested[i].server = server;
+                        }
+                    }
+                    return nested;
+                }
+            } catch (e) { /* fall through to live Plex */ }
+
+            var client = new Plex(server)
             const res = await client.Get(key)
 
             const size = (typeof(res.Metadata) !== 'undefined') ? res.Metadata.length : 0;

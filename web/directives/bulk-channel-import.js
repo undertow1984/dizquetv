@@ -266,7 +266,7 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                     let cols = await plex.getCollections(server);
                     let tv = await plex.getShows(server);
                     play = sortByTitle(play).map((p) => {
-                        return {
+                        let row = {
                             title: p.title,
                             key: p.key,
                             type: "playlist",
@@ -274,9 +274,14 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                             icon: p.icon,
                             count: p.count,
                         };
+                        // Keep cache children so expandToPrograms skips live Plex
+                        if (Array.isArray(p.children)) {
+                            row.children = p.children;
+                        }
+                        return row;
                     });
                     cols = sortByTitle(cols).map((c) => {
-                        return {
+                        let row = {
                             title: c.title,
                             key: c.key,
                             type: "collection",
@@ -286,6 +291,10 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                             icon: c.icon,
                             count: c.count,
                         };
+                        if (Array.isArray(c.children)) {
+                            row.children = c.children;
+                        }
+                        return row;
                     });
                     tv = sortByTitle(tv).map((s) => {
                         return {
@@ -296,6 +305,8 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                             selected: false,
                             icon: s.icon,
                             count: s.count,
+                            seasonCount: (typeof s.seasonCount !== 'undefined') ? s.seasonCount : null,
+                            episodeCount: (typeof s.episodeCount !== 'undefined') ? s.episodeCount : null,
                             ratingKey: s.ratingKey,
                         };
                     });

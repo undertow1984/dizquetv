@@ -17,6 +17,73 @@ module.exports = function ($http, $q) {
                 headers: { 'Content-Type': 'application/json; charset=utf-8' }
             }).then((d) => { return d.data })
         },
+        getPlexLibraryCacheStatus: () => {
+            return $http.get('/api/plex-library-cache/status').then((d) => { return d.data })
+        },
+        syncAllPlexLibraries: (opts) => {
+            return $http({
+                method: 'POST',
+                url: '/api/plex-library-cache/sync-all',
+                data: opts || {},
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                timeout: 3600000,
+            }).then((d) => { return d.data })
+        },
+        syncPlexLibrary: (serverName, sectionKey, opts) => {
+            return $http({
+                method: 'POST',
+                url: '/api/plex-library-cache/sync-library',
+                data: Object.assign({ serverName: serverName, sectionKey: sectionKey }, opts || {}),
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                timeout: 3600000,
+            }).then((d) => { return d.data })
+        },
+        deletePlexLibraryCache: (serverName, sectionKey) => {
+            return $http({
+                method: 'POST',
+                url: '/api/plex-library-cache/delete-library',
+                data: { serverName: serverName, sectionKey: sectionKey },
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            }).then((d) => { return d.data })
+        },
+        deleteAllPlexLibraryCache: () => {
+            return $http({
+                method: 'POST',
+                url: '/api/plex-library-cache/delete-all',
+                data: {},
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            }).then((d) => { return d.data })
+        },
+        getPlexCacheSections: (serverName, includeDisabled) => {
+            let q = includeDisabled ? '?includeDisabled=1' : '';
+            return $http.get('/api/plex-library-cache/sections/' + encodeURIComponent(serverName) + q)
+                .then((d) => { return d.data })
+        },
+        getPlexCachePlaylists: (serverName) => {
+            return $http.get('/api/plex-library-cache/playlists/' + encodeURIComponent(serverName))
+                .then((d) => { return d.data })
+        },
+        getPlexCacheCollections: (serverName) => {
+            return $http.get('/api/plex-library-cache/collections/' + encodeURIComponent(serverName))
+                .then((d) => { return d.data })
+        },
+        getPlexCacheShows: (serverName) => {
+            return $http.get('/api/plex-library-cache/shows/' + encodeURIComponent(serverName))
+                .then((d) => { return d.data })
+        },
+        getPlexCacheNested: (serverName, key, includeCollections) => {
+            return $http({
+                method: 'POST',
+                url: '/api/plex-library-cache/nested',
+                data: {
+                    serverName: serverName,
+                    key: key,
+                    // undefined → server default (true); explicit false excludes collections
+                    includeCollections: includeCollections,
+                },
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            }).then((d) => { return d.data })
+        },
         addPlexServer: (plexServer) => {
             return $http({
                 method: 'PUT',

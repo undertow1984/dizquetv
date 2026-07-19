@@ -199,6 +199,9 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
             scope.contentSourcesError = "";
             scope.contentSourcesSyncing = false;
             scope.contentSourcesSyncStatus = "";
+            // True only after loadContentSourceCatalog finishes (success or fail).
+            // Until then, never rebuild contentSources from empty checkbox lists.
+            scope.contentSourcesCatalogLoaded = false;
 
             function contentSourceId(src) {
                 return (src.serverName || "") + "\0" + (src.type || "") + "\0" + (src.key || "");
@@ -241,8 +244,19 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
                 };
             }
 
-            /** Rebuild channel.contentSources from catalog checkbox state (item.selected). */
+            /**
+             * Rebuild channel.contentSources from catalog checkbox state (item.selected).
+             * IMPORTANT: If the content-sources catalog was never loaded (user only edited
+             * basic settings / logo / etc.), do NOT replace contentSources with [] — that
+             * was wiping all source mappings on every channel Update.
+             */
             function syncContentSourcesFromCatalog() {
+                if (!scope.contentSourcesCatalogLoaded || scope.contentSourcesLoading) {
+                    // Preserve existing mappings until the user has opened/loaded the catalog
+                    return Array.isArray(scope.channel.contentSources)
+                        ? scope.channel.contentSources
+                        : [];
+                }
                 let selected = [];
                 let lists = [
                     scope.contentSourcePlaylists || [],
@@ -286,6 +300,7 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
 
             scope.loadContentSourceCatalog = async () => {
                 scope.contentSourcesLoading = true;
+                scope.contentSourcesCatalogLoaded = false;
                 scope.contentSourcesError = "";
                 scope.contentSourcePlaylists = [];
                 scope.contentSourceCollections = [];
@@ -295,6 +310,8 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
                     let servers = await dizquetv.getPlexServers();
                     if (!servers || servers.length === 0) {
                         scope.contentSourcesError = "No Plex servers configured.";
+                        // Catalog "loaded" empty — do not wipe existing contentSources
+                        // via checkboxes; keep catalogLoaded false so sync preserves them.
                         return;
                     }
                     let playlists = [];
@@ -359,6 +376,8 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
                                     title: t.title,
                                     serverName: server.name,
                                     count: t.count,
+                                    seasonCount: (typeof t.seasonCount !== 'undefined') ? t.seasonCount : null,
+                                    episodeCount: (typeof t.episodeCount !== 'undefined') ? t.episodeCount : null,
                                     collectionType: null,
                                     libraryTitle: t.libraryTitle || null,
                                 };
@@ -377,9 +396,12 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
                     scope.contentSourcePlaylists = playlists;
                     scope.contentSourceCollections = collections;
                     scope.contentSourceShows = shows;
+                    // Catalog is ready — checkbox state is authoritative for contentSources
+                    scope.contentSourcesCatalogLoaded = true;
                 } catch (err) {
                     console.error(err);
                     scope.contentSourcesError = "Unable to load Plex playlists/collections/shows.";
+                    // Leave catalogLoaded false so we never wipe saved contentSources
                 } finally {
                     scope.contentSourcesLoading = false;
                     $timeout();
@@ -1429,11 +1451,11 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
                     } else if (typeof channel.name === "undefined" || channel.name === null || channel.name === "") {
                         scope.error.name = "Enter a channel name."
                         scope.error.tab = "basic";
-                    } else if (channel.icon !== "" && !validURL(channel.icon)) {
-                        scope.error.icon = "Please enter a valid image URL. Or leave blank."
+                    } else if (channel.icon !== "" && !validImagePathOrUrl(channel.icon)) {
+                        scope.error.icon = "Please enter a valid image URL or path (e.g. /images/… or https://…). Or leave blank."
                         scope.error.tab = "basic";
-                    } else if (channel.overlayIcon && !validURL(channel.icon)) {
-                        scope.error.icon = "Please enter a valid image URL. Cant overlay an invalid image."
+                    } else if (channel.overlayIcon && !validImagePathOrUrl(channel.icon)) {
+                        scope.error.icon = "Please enter a valid image URL or path. Cant overlay an invalid image."
                         scope.error.tab = "basic";
                     } else if (now < channel.startTime) {
                         scope.error.startTime = "Start time must not be set in the future."
@@ -2240,8 +2262,39 @@ module.exports = function ($timeout, $location, dizquetv, plex, resolutionOption
         }
     }
 }
+/**
+ * Accept absolute URLs and site-relative paths used for channel icons/logos.
+ * Examples: https://…, /images/dizquetv.png, /cache/channel-logos/ch1-logo.png?v=123
+ */
 function validURL(url) {
-    return /^(ftp|http|https):\/\/[^ "]+$/.test(url);
+    return validImagePathOrUrl(url);
+}
+
+function validImagePathOrUrl(url) {
+    if (url == null) {
+        return false;
+    }
+    let s = String(url).trim();
+    if (s === '') {
+        return false;
+    }
+    // Absolute URL (ftp/http/https)
+    if (/^(ftp|http|https):\/\/[^ "]+$/i.test(s)) {
+        return true;
+    }
+    // Root-relative path (optional query/hash), e.g. /images/x.png or /cache/channel-logos/ch1-logo.png?v=1
+    if (/^\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/.test(s) && s.indexOf('//') !== 0) {
+        return true;
+    }
+    // file:// for local absolute files (optional)
+    if (/^file:\/\/\/.+/i.test(s)) {
+        return true;
+    }
+    // Windows absolute path C:\… or C:/…
+    if (/^[A-Za-z]:[\\/]/.test(s)) {
+        return true;
+    }
+    return false;
 }
 
 function checkChannelNumber(number) {

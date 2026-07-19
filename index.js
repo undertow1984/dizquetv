@@ -101,12 +101,14 @@ let fontAwesome = "fontawesome-free-5.15.4-web";
 let bootstrap = "bootstrap-4.4.1-dist";
 initDB(db, channelDB)
 
-channelService = new ChannelService(channelDB);
+channelService = new ChannelService(channelDB, db);
 
 fillerDB = new FillerDB( path.join(process.env.DATABASE, 'filler') , channelService );
 customShowDB = new CustomShowDB( path.join(process.env.DATABASE, 'custom-shows') );
 let programPlayTimeDB = new ProgramPlayTimeDB( path.join(process.env.DATABASE, 'play-cache') );
 let ffmpegSettingsService = new FfmpegSettingsService(db, unlockPath);
+const PlexLibraryCacheService = require('./src/services/plex-library-cache-service');
+let plexLibraryCacheService = new PlexLibraryCacheService(db);
 
 async function initializeProgramPlayTimeDB() {
     try {
@@ -291,13 +293,25 @@ app.use(express.static(path.join(__dirname, 'web','public')))
 app.use('/images', express.static(path.join(process.env.DATABASE, 'images'), logoStaticOptions))
 app.use('/cache/images', cacheImageService.routerInterceptor())
 app.use('/cache/images', express.static(path.join(process.env.DATABASE, 'cache','images'), logoStaticOptions))
+// Dynamic channel logos generated from PSD template (transparent PNGs)
+if (!fs.existsSync(path.join(process.env.DATABASE, 'cache', 'channel-logos'))) {
+    fs.mkdirSync(path.join(process.env.DATABASE, 'cache', 'channel-logos'), { recursive: true });
+}
+// Dynamic logos change on each channel Update — avoid long browser cache
+const channelLogoStaticOptions = {
+    setHeaders: (res) => {
+        res.set('Cache-Control', 'public, max-age=60, must-revalidate');
+        res.set('Access-Control-Allow-Origin', '*');
+    }
+};
+app.use('/cache/channel-logos', express.static(path.join(process.env.DATABASE, 'cache', 'channel-logos'), channelLogoStaticOptions))
 app.use('/favicon.svg', express.static(
     path.join(__dirname, 'resources','favicon.svg')
 ) );
 app.use('/custom.css', express.static(path.join(process.env.DATABASE, 'custom.css')))
 
 // API Routers
-app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService))
+app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService))
 app.use('/api/cache/images', cacheImageService.apiRouters())
 app.use('/' + fontAwesome, express.static(path.join(process.env.DATABASE, fontAwesome)))
 app.use('/' + bootstrap, express.static(path.join(process.env.DATABASE, bootstrap)))
@@ -317,6 +331,16 @@ function initDB(db, channelDB) {
         let data = fs.readFileSync(path.resolve(path.join(__dirname, 'resources/dizquetv.png')))
         fs.writeFileSync(process.env.DATABASE + '/images/dizquetv.png', data)
     }
+    // Deploy Plex channel-logo PSD templates into the data folder (user-editable copies)
+    // Plex-Template.psd = 1-word names; Plex-Template-Two.psd = 2+ word names
+    ;['Plex-Template.psd', 'Plex-Template-Two.psd'].forEach(function (fname) {
+        let dest = path.join(process.env.DATABASE, fname);
+        let src = path.resolve(path.join(__dirname, 'resources', fname));
+        if (fs.existsSync(src) && !fs.existsSync(dest)) {
+            fs.copyFileSync(src, dest);
+            console.log('dizqueTV: deployed ' + fname + ' → ' + dest);
+        }
+    });
     dbMigration.initDB(db, channelDB, __dirname);
     if (!fs.existsSync(process.env.DATABASE + '/font.ttf')) {
         let data = fs.readFileSync(path.resolve(path.join(__dirname, 'resources/font.ttf')))

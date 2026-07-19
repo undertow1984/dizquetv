@@ -140,7 +140,7 @@
                                                 ng-model="s.selected"
                                                 ng-disabled="importing"
                                                 style="margin-right: 0.5rem;" />
-                                            {{ s.title }}<span ng-if="s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
+                                            {{ s.title }}<span ng-if="s.seasonCount != null && s.episodeCount != null"> (S{{ s.seasonCount }} E{{ s.episodeCount }})</span><span ng-if="(s.seasonCount == null || s.episodeCount == null) && s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
                                             <span class="text-muted small" ng-show="s.libraryTitle"> — {{ s.libraryTitle }}</span>
                                         </label>
                                     </div>

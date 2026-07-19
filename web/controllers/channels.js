@@ -57,6 +57,7 @@ module.exports = function ($scope, dizquetv) {
         }
         if (typeof channel !== 'undefined') {
             if ($scope.selectedChannelIndex == -1) { // add new channel
+                // Server may generate dynamic logo and return channel with icon path
                 await dizquetv.addChannel(channel);
                 $scope.showChannelConfig = false
                 $scope.refreshChannels();
@@ -67,7 +68,7 @@ module.exports = function ($scope, dizquetv) {
             ) {
                 //update + change channel number.
                 $scope.channels[ $scope.selectedChannelIndex ].pending = true;
-                await dizquetv.updateChannel(channel),
+                await dizquetv.updateChannel(channel);
                 await dizquetv.removeChannel( { number: $scope.originalChannelNumber } )
                 $scope.showChannelConfig = false
                 $scope.$apply();

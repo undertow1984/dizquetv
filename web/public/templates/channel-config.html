@@ -169,7 +169,8 @@
                                                     ng-change="onContentSourceCheckChange()"
                                                     style="margin-right: 0.5rem;" />
                                                 {{ s.title }}
-                                                <span ng-if="s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
+                                                <span ng-if="s.seasonCount != null && s.episodeCount != null"> (S{{ s.seasonCount }} E{{ s.episodeCount }})</span>
+                                                <span ng-if="(s.seasonCount == null || s.episodeCount == null) && s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
                                                 <span class="text-muted small" ng-if="s.libraryTitle"> — {{ s.libraryTitle }}</span>
                                                 <span class="text-muted small" ng-if="s.serverName"> ({{ s.serverName }})</span>
                                             </label>
@@ -198,10 +199,10 @@
 
                     <div>
                         <span class="pull-right text-danger">{{error.icon}}</span>
-                        <label for="channelIcon" class="small">Channel Icon</label>
+                        <label for="channelIcon" class="small">Channel Icon / Logo</label>
 
                         <div class="input-group mb-1">
-                            <input name="channelIcon" id="channelIcon" class="form-control form-control-sm" type="url" ng-model="channel.icon"></input>
+                            <input name="channelIcon" id="channelIcon" class="form-control form-control-sm" type="text" ng-model="channel.icon" placeholder="/images/… or https://… or /cache/channel-logos/…"></input>
                             <div class="input-group-append">
                                 <input type="file"
                                 accept="image/*"
@@ -212,11 +213,19 @@
                                 </input>
                             </div>
                         </div>
+                        <small class="form-text text-muted">
+                            Leave empty (or use the default dizqueTV image) and enable
+                            <strong>Generate Dynamic Channel Logos</strong> under FFmpeg settings:
+                            on <strong>Update</strong>, a transparent PNG is built from
+                            <code>Plex-Template.psd</code> (one-word names) or
+                            <code>Plex-Template-Two.psd</code> (two or more words), and this field is filled with its path.
+                            Upload a custom image anytime to override.
+                        </small>
 
                         <br></br>
                         <div>
                             <h6>Preview</h6>
-                            <img ng-if="channel.icon !== ''" ng-src="{{channel.icon}}" alt="{{channel.name}}" style="max-height: 120px;"></img>
+                            <img ng-if="channel.icon !== ''" ng-src="{{channel.icon}}" alt="{{channel.name}}" style="max-height: 120px; background: #222;"></img>
                             <span ng-if="channel.icon === ''">{{channel.name}}</span>
                         </div>
                     </div>
@@ -943,7 +952,7 @@
                                     Watermark Picture URL:
                                 </label>
 
-                                <input id='overlayURL' class='form-control' type='url' ng-model='channel.watermark.url' placeholder="Leave empty to use the channel&apos;s icon.">
+                                <input id='overlayURL' class='form-control' type='text' ng-model='channel.watermark.url' placeholder="Leave empty to use the channel's icon (relative /path or https://… OK).">
                                 </input>
                                 <div class="input-group-append">
                                     <input type="file"

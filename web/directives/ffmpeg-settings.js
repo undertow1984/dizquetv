@@ -52,6 +52,15 @@ module.exports = function (dizquetv, resolutionOptions, $timeout) {
                 if (typeof settings.disablePreludes === 'undefined') {
                     settings.disablePreludes = false;
                 }
+                if (typeof settings.enableDynamicChannelLogos === 'undefined') {
+                    settings.enableDynamicChannelLogos = false;
+                }
+                if (typeof settings.channelLogoTemplatePath === 'undefined' || settings.channelLogoTemplatePath === null) {
+                    settings.channelLogoTemplatePath = '';
+                }
+                if (typeof settings.channelLogoTemplateTwoPath === 'undefined' || settings.channelLogoTemplateTwoPath === null) {
+                    settings.channelLogoTemplateTwoPath = '';
+                }
                 if (typeof settings.logFfmpeg === 'undefined') {
                     settings.logFfmpeg = false;
                 }

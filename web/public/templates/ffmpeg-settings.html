@@ -402,6 +402,60 @@
         <div class="row">
             <div class="col-sm-9">
                 <div class="form-group">
+                    <input id="enableDynamicChannelLogos" type="checkbox"
+                        ng-model="settings.enableDynamicChannelLogos"
+                        ng-disabled="isTranscodingNotNeeded() || settings.disableChannelOverlay" ></input>
+                    <label for="enableDynamicChannelLogos">Generate Dynamic Channel Logos</label>
+                    <small class="form-text text-muted">
+                        When enabled, saving a channel (<strong>Update</strong>) with an empty / default channel icon
+                        generates a transparent PNG from the Photoshop template: the <strong>PLEX</strong> layer is kept,
+                        the <strong>channel name</strong> is drawn just under it (nearly the same size as the PLEX type),
+                        using the same typeface as the PSD when available (bundled template uses <strong>Futura PT Bold</strong>;
+                        falls back to Montserrat Bold / other geometric sans if Futura is not installed).
+                        The path is written into the channel’s <strong>Channel Icon</strong> field (also used for watermark when watermark URL is empty).
+                        Requires <strong>ImageMagick 7+</strong> (<code>magick</code> on PATH). Optional: install Futura PT Bold system-wide or place
+                        <code>FuturaPT-Bold.otf</code> in <code>.dizquetv/fonts/</code>. Files live in <code>cache/channel-logos</code>.
+                    </small>
+                </div>
+            </div>
+        </div>
+        <div class="row" ng-show="settings.enableDynamicChannelLogos">
+            <div class="col-sm-9">
+                <div class="form-group">
+                    <label for="channelLogoTemplatePath">One-Word Logo Template (PSD)</label>
+                    <input id="channelLogoTemplatePath" type="text" class="form-control form-control-sm"
+                        ng-model="settings.channelLogoTemplatePath"
+                        placeholder="Leave empty for .dizquetv/Plex-Template.psd"
+                        ng-disabled="isTranscodingNotNeeded()" ></input>
+                    <small class="form-text text-muted">
+                        Used when the channel name is a <strong>single word</strong> (e.g. <code>GIGGLE</code>).
+                        Leave empty for <code>.dizquetv/Plex-Template.psd</code> (copied from resources on first start).
+                        Keep a layer labeled like <strong>Plex Logo</strong> (always retained).
+                    </small>
+                </div>
+            </div>
+        </div>
+        <div class="row" ng-show="settings.enableDynamicChannelLogos">
+            <div class="col-sm-9">
+                <div class="form-group">
+                    <label for="channelLogoTemplateTwoPath">Two-Word Logo Template (PSD)</label>
+                    <input id="channelLogoTemplateTwoPath" type="text" class="form-control form-control-sm"
+                        ng-model="settings.channelLogoTemplateTwoPath"
+                        placeholder="Leave empty for .dizquetv/Plex-Template-Two.psd"
+                        ng-disabled="isTranscodingNotNeeded()" ></input>
+                    <small class="form-text text-muted">
+                        Used when the channel name has <strong>two or more words</strong> (e.g. <code>ADULT TOON</code>).
+                        Leave empty for <code>.dizquetv/Plex-Template-Two.psd</code> (copied from resources on first start).
+                        Sample text layers define the two name lines under PLEX (word 1 on the upper line, word 2+ on the lower).
+                    </small>
+                </div>
+            </div>
+        </div>
+
+        <br ></br>
+        <div class="row">
+            <div class="col-sm-9">
+                <div class="form-group">
                     <input id="disablePreludes" type="checkbox" ng-model="settings.disablePreludes" ng-disabled="isTranscodingNotNeeded()" ></input>
                     <label for="disablePreludes">Disable Preludes</label>
                     <small class="form-text text-muted">
