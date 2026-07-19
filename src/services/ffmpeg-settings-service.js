@@ -210,6 +210,32 @@ function fixupFFMPEGSettings(ffmpeg) {
     ffmpeg.normalizeAudio = asBool(ffmpeg.normalizeAudio, true);
     ffmpeg.enableChannelWatermarkGlobally = asBool(ffmpeg.enableChannelWatermarkGlobally, false);
     ffmpeg.disableChannelOverlay = asBool(ffmpeg.disableChannelOverlay, false);
+    ffmpeg.enableDynamicChannelLogos = asBool(ffmpeg.enableDynamicChannelLogos, false);
+    if (typeof(ffmpeg.channelLogoTemplatePath) === 'undefined' || ffmpeg.channelLogoTemplatePath === null) {
+        ffmpeg.channelLogoTemplatePath = '';
+    } else {
+        ffmpeg.channelLogoTemplatePath = String(ffmpeg.channelLogoTemplatePath).trim();
+        // Allow empty (default bundled template). If set, must exist when dynamic logos are on.
+        if (
+            ffmpeg.enableDynamicChannelLogos
+            && ffmpeg.channelLogoTemplatePath !== ''
+            && !isValidFilePath(ffmpeg.channelLogoTemplatePath)
+        ) {
+            return "channelLogoTemplatePath must be an absolute path to an existing PSD file (or leave empty for the default one-word template).";
+        }
+    }
+    if (typeof(ffmpeg.channelLogoTemplateTwoPath) === 'undefined' || ffmpeg.channelLogoTemplateTwoPath === null) {
+        ffmpeg.channelLogoTemplateTwoPath = '';
+    } else {
+        ffmpeg.channelLogoTemplateTwoPath = String(ffmpeg.channelLogoTemplateTwoPath).trim();
+        if (
+            ffmpeg.enableDynamicChannelLogos
+            && ffmpeg.channelLogoTemplateTwoPath !== ''
+            && !isValidFilePath(ffmpeg.channelLogoTemplateTwoPath)
+        ) {
+            return "channelLogoTemplateTwoPath must be an absolute path to an existing PSD file (or leave empty for the default two-word template).";
+        }
+    }
     ffmpeg.disablePreludes = asBool(ffmpeg.disablePreludes, false);
     // Subtitle mode (UI); keep includeSubtitles boolean in sync for older callers
     let subMode = normalizeSubtitleMode(ffmpeg);

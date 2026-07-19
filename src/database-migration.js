@@ -413,6 +413,12 @@ function ffmpeg() {
         deinterlaceFilter: "none",
         disableChannelOverlay: false,
         enableChannelWatermarkGlobally: false,
+        // When watermark/icon image path is empty, render channel name into Plex templates
+        enableDynamicChannelLogos: false,
+        // 1-word names; empty = .dizquetv/Plex-Template.psd (from resources)
+        channelLogoTemplatePath: "",
+        // 2+ word names; empty = .dizquetv/Plex-Template-Two.psd (from resources)
+        channelLogoTemplateTwoPath: "",
         // Skip loading splash + black interlude frames between programs
         disablePreludes: false,
         // Preferred ISO 639 language for audio + subtitle track selection (e.g. eng, spa)

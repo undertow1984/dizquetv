@@ -78,6 +78,9 @@ class PlexPlayer {
                 'enableHdrToneMapping', 'hdrToneMappingAlgorithm',
                 'transcodingSpeed', 'hardwareDecode', 'hardwareDecodeDevice',
                 'hwAccelExtraFrames', 'disableChannelOverlay',
+                'enableDynamicChannelLogos', 'channelLogoTemplatePath',
+                'channelLogoTemplateTwoPath',
+                'enableChannelWatermarkGlobally',
             ];
             for (let i = 0; i < LIVE_KEYS.length; i++) {
                 let k = LIVE_KEYS[i];
@@ -129,7 +132,27 @@ class PlexPlayer {
             );
             let plexTranscoder = new PlexTranscoder(this.clientId, server, plexSettings, channel, lineupItem);
             this.plexTranscoder = plexTranscoder;
+            // Re-resolve watermark after live FFmpeg settings (dynamic PSD logos need enableDynamicChannelLogos)
+            try {
+                const helperFuncs = require('./helperFuncs');
+                this.context.watermark = helperFuncs.getWatermark(
+                    ffmpegSettings,
+                    channel,
+                    lineupItem.type
+                );
+            } catch (wmErr) {
+                console.error('dizqueTV: watermark resolve failed', wmErr.message || wmErr);
+            }
             let watermark = this.context.watermark;
+            if (watermark && watermark.url) {
+                console.log('dizqueTV: watermark url=' + watermark.url);
+            } else {
+                console.log(
+                    'dizqueTV: no watermark ' +
+                    '(enabled=' + !!(channel.watermark && channel.watermark.enabled) +
+                    ', dynamicLogos=' + (ffmpegSettings.enableDynamicChannelLogos === true) + ')'
+                );
+            }
             let ffmpeg = new FFMPEG(ffmpegSettings, channel);  // Set the transcoder options
             ffmpeg.setAudioOnly( this.context.audioOnly );
             this.ffmpeg = ffmpeg;

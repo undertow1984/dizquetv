@@ -401,8 +401,11 @@ class FFMPEG extends events.EventEmitter {
             if (doOverlay) {
                 if (watermark.animated === true) {
                     ffmpegArgs.push('-ignore_loop', '0');
+                } else {
+                    // Still PNG/GIF/JPG: loop so overlay lasts the full segment
+                    ffmpegArgs.push('-loop', '1');
                 }
-                ffmpegArgs.push(`-i`, `${watermark.url}`  );
+                ffmpegArgs.push(`-i`, `${watermark.url}`);
                 overlayFile = inputFiles++;
                 this.ensureResolution = true;
             }

@@ -328,12 +328,66 @@ function getWatermark(  ffmpegSettings, channel, type) {
     }
     if ( (typeof(icon) === 'undefined') || (icon === '') ) {
         icon = channel.icon;
-        if ( (typeof(icon) === 'undefined') || (icon === '') ) {
-            return null;
+    }
+    // Dynamic channel logo from PSD template when no custom image path is set.
+    // Treat common defaults (empty, missing, or stock dizquetv icon) as "no image".
+    let iconEmpty = (
+        typeof(icon) === 'undefined'
+        || icon === null
+        || String(icon).trim() === ''
+        || /\/images\/dizquetv\.png$/i.test(String(icon))
+        || /images\/dizquetv\.png$/i.test(String(icon))
+    );
+    if (iconEmpty && ffmpegSettings && ffmpegSettings.enableDynamicChannelLogos === true) {
+        try {
+            const logoGen = require('./channel-logo-generator');
+            let dyn = logoGen.resolveDynamicLogoUrl(ffmpegSettings, channel);
+            if (dyn) {
+                icon = dyn;
+                console.log(
+                    `dizqueTV watermark: PSD dynamic logo for ch${channel.number} ` +
+                    `"${channel.name}" → ${dyn}`
+                );
+            } else {
+                console.error(
+                    `dizqueTV watermark: dynamic logo generation returned nothing for ch${channel.number}`
+                );
+            }
+        } catch (err) {
+            console.error('dizqueTV watermark: dynamic logo failed', err.message || err);
         }
     }
+    if ( (typeof(icon) === 'undefined') || (icon === '') || icon === null ) {
+        return null;
+    }
+    // FFmpeg needs an absolute URL or filesystem path (not a bare /cache/... path)
+    let overlayUrl = String(icon).trim();
+    // Drop cache-busting query for local file resolution
+    let pathOnly = overlayUrl.split('?')[0];
+    if (/^https?:\/\//i.test(overlayUrl)) {
+        // keep full URL (query ok for HTTP)
+    } else if (pathOnly.indexOf('/cache/channel-logos/') === 0) {
+        // Prefer absolute file path for generated logos (reliable for FFmpeg)
+        try {
+            const pathMod = require('path');
+            const fsMod = require('fs');
+            let abs = pathMod.join(
+                process.env.DATABASE || '',
+                pathOnly.replace(/^\//, '').split('/').join(pathMod.sep)
+            );
+            if (fsMod.existsSync(abs)) {
+                overlayUrl = abs.replace(/\\/g, '/');
+            } else {
+                overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
+            }
+        } catch (e) {
+            overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
+        }
+    } else if (pathOnly.charAt(0) === '/') {
+        overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
+    }
     let result = {
-        url: icon,
+        url: overlayUrl,
         width: watermark.width,
         verticalMargin: watermark.verticalMargin,
         horizontalMargin: watermark.horizontalMargin,

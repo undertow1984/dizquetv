@@ -1,11 +1,13 @@
 const events = require('events')
 const channelCache = require("../channel-cache");
+const logoGen = require('../channel-logo-generator');
 
 class ChannelService extends events.EventEmitter {
 
-    constructor(channelDB) {
+    constructor(channelDB, db) {
         super();
         this.channelDB = channelDB;
+        this.db = db || null;
         this.onDemandService = null;
     }
 
@@ -13,9 +15,27 @@ class ChannelService extends events.EventEmitter {
         this.onDemandService = onDemandService;
     }
 
+    setDatabase(db) {
+        this.db = db;
+    }
+
     async saveChannel(number, channelJson, options) {
         
         let channel = cleanUpChannel(channelJson);
+
+        // Dynamic PSD logos: generate PNG on channel Update and fill channel.icon
+        try {
+            let ffmpegSettings = null;
+            if (this.db && this.db['ffmpeg-settings']) {
+                ffmpegSettings = this.db['ffmpeg-settings'].find()[0];
+            }
+            if (ffmpegSettings && ffmpegSettings.enableDynamicChannelLogos === true) {
+                logoGen.applyDynamicLogoOnChannelSave(channel, ffmpegSettings);
+            }
+        } catch (logoErr) {
+            console.error('dizqueTV: dynamic logo on channel save failed', logoErr.message || logoErr);
+        }
+
         let ignoreOnDemand = true;
         if (
             (this.onDemandService != null)
@@ -87,10 +107,14 @@ function cleanUpChannel(channel) {
     ) {
       channel.groupTitle = "dizqueTV";
     }
-    channel.programs = channel.programs.flatMap( cleanUpProgram );
+    // Never drop content source mappings
+    if (!Array.isArray(channel.contentSources)) {
+      channel.contentSources = [];
+    }
+    channel.programs = (channel.programs || []).flatMap( cleanUpProgram );
     delete channel.fillerContent;
     delete channel.filler;
-    channel.fallback = channel.fallback.flatMap( cleanUpProgram );
+    channel.fallback = (channel.fallback || []).flatMap( cleanUpProgram );
     channel.duration = 0;
     for (let i = 0; i < channel.programs.length; i++) {
       channel.duration += channel.programs[i].duration;
