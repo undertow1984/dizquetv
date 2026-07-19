@@ -210,6 +210,33 @@ module.exports = function ($http, $q) {
                 headers: { 'Content-Type': 'application/json; charset=utf-8' }
             }).then((d) => { return d.data })
         },
+        getImagemagickSettings: () => {
+            return $http.get('/api/imagemagick-settings').then((d) => { return d.data })
+        },
+        updateImagemagickSettings: (config) => {
+            return $http({
+                method: 'PUT',
+                url: '/api/imagemagick-settings',
+                data: angular.toJson(config),
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            }).then((d) => { return d.data })
+        },
+        resetImagemagickSettings: (config) => {
+            return $http({
+                method: 'POST',
+                url: '/api/imagemagick-settings',
+                data: angular.toJson(config || {}),
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            }).then((d) => { return d.data })
+        },
+        testImagemagickSettings: (config) => {
+            return $http({
+                method: 'POST',
+                url: '/api/imagemagick-settings/test',
+                data: angular.toJson(config || {}),
+                headers: { 'Content-Type': 'application/json; charset=utf-8' }
+            }).then((d) => { return d.data })
+        },
         getChannels: () => {
             return $http.get('/api/channels').then((d) => { return d.data })
         },

@@ -1,0 +1,49 @@
+<div>
+    <small class="text-danger" ng-show="settingsError">
+        {{ settingsError }}
+    </small>
+
+    <h5>ImageMagick Settings
+        <button class="pull-right btn btn-sm btn-success" style="margin-left: 5px;" ng-click="updateSettings(settings)">
+            Update
+        </button>
+        <button class="pull-right btn btn-sm btn-warning" ng-click="resetSettings()">
+            Reset Options
+        </button>
+    </h5>
+
+    <hr />
+
+    <h6>ImageMagick Executable Path</h6>
+    <div class="row">
+        <div class="col-sm-9">
+            <div class="form-group">
+                <label for="magickPath">Path</label>
+                <input id="magickPath"
+                    type="text"
+                    class="form-control form-control-sm"
+                    ng-model="settings.magickPath"
+                    placeholder="Leave empty to use magick on PATH"
+                    autocomplete="off" />
+                <small class="form-text text-muted">
+                    Full path to the ImageMagick 7+ <code>magick</code> executable
+                    (e.g. <code>/usr/bin/magick</code> or
+                    <code>C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe</code>).
+                    Leave empty to auto-detect <code>magick</code> / <code>magick.exe</code> on the system PATH.
+                    Used for dynamic channel logo generation from PSD templates.
+                </small>
+            </div>
+            <div class="form-group">
+                <button type="button"
+                    class="btn btn-sm btn-outline-primary"
+                    ng-click="testPath()"
+                    ng-disabled="testPending">
+                    <span class="fa fa-spinner fa-spin" ng-show="testPending"></span>
+                    Test Path
+                </button>
+                <span class="text-success small ml-2" ng-show="testStatus">{{ testStatus }}</span>
+                <span class="text-danger small ml-2" ng-show="testError">{{ testError }}</span>
+            </div>
+        </div>
+    </div>
+</div>

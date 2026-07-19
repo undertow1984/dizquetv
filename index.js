@@ -95,7 +95,7 @@ if(!fs.existsSync(path.join(process.env.DATABASE, 'cache','images'))) {
 
 channelDB = new ChannelDB( path.join(process.env.DATABASE, 'channels') );
 
-db.connect(process.env.DATABASE, ['channels', 'plex-servers', 'ffmpeg-settings', 'plex-settings', 'xmltv-settings', 'hdhr-settings', 'db-version', 'client-id', 'cache-images', 'settings', 'plex-library-settings'])
+db.connect(process.env.DATABASE, ['channels', 'plex-servers', 'ffmpeg-settings', 'plex-settings', 'xmltv-settings', 'hdhr-settings', 'imagemagick-settings', 'db-version', 'client-id', 'cache-images', 'settings', 'plex-library-settings'])
 
 let fontAwesome = "fontawesome-free-5.15.4-web";
 let bootstrap = "bootstrap-4.4.1-dist";
@@ -107,6 +107,8 @@ fillerDB = new FillerDB( path.join(process.env.DATABASE, 'filler') , channelServ
 customShowDB = new CustomShowDB( path.join(process.env.DATABASE, 'custom-shows') );
 let programPlayTimeDB = new ProgramPlayTimeDB( path.join(process.env.DATABASE, 'play-cache') );
 let ffmpegSettingsService = new FfmpegSettingsService(db, unlockPath);
+const ImageMagickSettingsService = require('./src/services/imagemagick-settings-service');
+let imagemagickSettingsService = new ImageMagickSettingsService(db);
 const PlexLibraryCacheService = require('./src/services/plex-library-cache-service');
 let plexLibraryCacheService = new PlexLibraryCacheService(db);
 
@@ -311,7 +313,7 @@ app.use('/favicon.svg', express.static(
 app.use('/custom.css', express.static(path.join(process.env.DATABASE, 'custom.css')))
 
 // API Routers
-app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService))
+app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService))
 app.use('/api/cache/images', cacheImageService.apiRouters())
 app.use('/' + fontAwesome, express.static(path.join(process.env.DATABASE, fontAwesome)))
 app.use('/' + bootstrap, express.static(path.join(process.env.DATABASE, bootstrap)))
