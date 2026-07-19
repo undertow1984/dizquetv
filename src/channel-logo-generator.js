@@ -8,7 +8,8 @@
  *  4. Draw the channel name BELOW the PLEX logo
  *  5. Export a transparent PNG (RGBA) for FFmpeg watermark overlay
  *
- * Requires ImageMagick 7+ (`magick` on PATH).
+ * Requires ImageMagick 7+ (`magick`). Path is configurable via Settings → ImageMagick;
+ * empty path falls back to `magick` / `magick.exe` on PATH.
  */
 const fs = require('fs');
 const path = require('path');
@@ -27,6 +28,8 @@ const GENERATOR_VERSION = '4';
 
 let _magickChecked = false;
 let _magickPath = null;
+/** User-configured absolute/relative path from imagemagick-settings (null = auto PATH) */
+let _configuredMagickPath = null;
 let _templateMetaCache = new Map();
 
 function projectRoot() {
@@ -171,33 +174,122 @@ function workDir() {
     return dir;
 }
 
+/**
+ * Apply path from ImageMagick settings. Empty/null → auto-detect on PATH.
+ * Clears the resolution cache so the next call re-validates.
+ * @param {string|null|undefined} magickPath
+ */
+function configureMagick(magickPath) {
+    let p = (magickPath == null) ? '' : String(magickPath).trim();
+    _configuredMagickPath = p || null;
+    _magickChecked = false;
+    _magickPath = null;
+}
+
+function _probeMagickBinary(bin) {
+    try {
+        let r = spawnSync(bin, ['-version'], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 5000,
+        });
+        if (r.error) {
+            return { ok: false, error: r.error.message || String(r.error), bin: bin };
+        }
+        let out = ((r.stdout || '') + '\n' + (r.stderr || '')).toString();
+        if (r.status === 0 || out.indexOf('ImageMagick') !== -1) {
+            let versionLine = out.split(/\r?\n/).find((l) => /ImageMagick/i.test(l)) || out.slice(0, 200).trim();
+            return { ok: true, bin: bin, version: versionLine.trim() };
+        }
+        return {
+            ok: false,
+            error: (r.stderr || r.stdout || 'magick -version failed status=' + r.status).toString().slice(0, 400),
+            bin: bin,
+        };
+    } catch (e) {
+        return { ok: false, error: e.message || String(e), bin: bin };
+    }
+}
+
+/**
+ * Resolve magick executable.
+ * If a path is configured in settings, only that path is used (no silent PATH fallback).
+ * If empty, auto-detect magick / magick.exe on PATH.
+ * @returns {string|null}
+ */
 function findMagick() {
     if (_magickChecked) {
         return _magickPath;
     }
     _magickChecked = true;
-    let candidates = ['magick', 'magick.exe'];
+    let candidates = [];
+    if (_configuredMagickPath) {
+        candidates.push(_configuredMagickPath);
+        // On Windows, allow path without extension
+        if (process.platform === 'win32' && !/\.exe$/i.test(_configuredMagickPath)) {
+            candidates.push(_configuredMagickPath + '.exe');
+        }
+    } else {
+        candidates.push('magick', 'magick.exe');
+    }
     for (let i = 0; i < candidates.length; i++) {
-        try {
-            let r = spawnSync(candidates[i], ['-version'], {
-                encoding: 'utf8',
-                windowsHide: true,
-                timeout: 5000,
-            });
-            if (r.status === 0 || (r.stdout && String(r.stdout).indexOf('ImageMagick') !== -1)) {
-                _magickPath = candidates[i];
-                return _magickPath;
-            }
-        } catch (e) { /* try next */ }
+        let probe = _probeMagickBinary(candidates[i]);
+        if (probe.ok) {
+            _magickPath = candidates[i];
+            return _magickPath;
+        }
     }
     _magickPath = null;
     return null;
 }
 
+/**
+ * Test a path (or current config / PATH) without permanently changing settings.
+ * @param {string|null|undefined} [pathToTest]
+ */
+function testMagickPath(pathToTest) {
+    let prevConfigured = _configuredMagickPath;
+    let prevChecked = _magickChecked;
+    let prevPath = _magickPath;
+    try {
+        if (typeof pathToTest !== 'undefined') {
+            configureMagick(pathToTest);
+        }
+        let bin = findMagick();
+        if (!bin) {
+            return {
+                ok: false,
+                error: _configuredMagickPath
+                    ? ('ImageMagick not found at configured path: ' + _configuredMagickPath)
+                    : 'ImageMagick (magick) not found on PATH. Set the executable path in Settings → ImageMagick.',
+                configured: !!_configuredMagickPath,
+            };
+        }
+        let probe = _probeMagickBinary(bin);
+        return {
+            ok: !!probe.ok,
+            path: bin,
+            version: probe.version || null,
+            error: probe.ok ? null : (probe.error || 'Failed'),
+            configured: !!_configuredMagickPath,
+        };
+    } finally {
+        // Restore prior config state (test should not stick unless caller configures)
+        _configuredMagickPath = prevConfigured;
+        _magickChecked = prevChecked;
+        _magickPath = prevPath;
+    }
+}
+
 function magickRun(args, timeoutMs) {
     let bin = findMagick();
     if (!bin) {
-        return { ok: false, error: 'ImageMagick (magick) not found on PATH' };
+        return {
+            ok: false,
+            error: _configuredMagickPath
+                ? ('ImageMagick not found at: ' + _configuredMagickPath)
+                : 'ImageMagick (magick) not found. Configure path in Settings → ImageMagick or add magick to PATH.',
+        };
     }
     // Allow first arg "identify" as a subcommand for magick identify ...
     let argv = args;
@@ -648,8 +740,9 @@ function generateChannelLogo(opts) {
 
     if (!findMagick()) {
         console.error(
-            'dizqueTV channel-logo: ImageMagick `magick` not found on PATH. ' +
-            'Install ImageMagick 7+ to enable dynamic channel logos.'
+            'dizqueTV channel-logo: ImageMagick not found' +
+            (_configuredMagickPath ? (' at "' + _configuredMagickPath + '"') : ' on PATH') +
+            '. Set Settings → ImageMagick path, or install ImageMagick 7+ and add magick to PATH.'
         );
         return null;
     }
@@ -1069,6 +1162,8 @@ module.exports = {
     isImagePathEmpty,
     cacheDir,
     findMagick,
+    configureMagick,
+    testMagickPath,
     inspectTemplate,
     TEMPLATE_ONE_FILENAME,
     TEMPLATE_TWO_FILENAME,

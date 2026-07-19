@@ -20,7 +20,7 @@
 const path = require('path');
 var fs = require('fs');
 
-const TARGET_VERSION = 805;
+const TARGET_VERSION = 806;
 const DAY_MS = 1000 * 60 * 60 * 24;
 
 const STEPS = [
@@ -46,6 +46,7 @@ const STEPS = [
     [    802,    803, () => fixNonIntegerDurations() ],
     [    803,    805, (db) => addFFMpegLock(db) ],
     [    804,    805, (db) => addFFMpegLock(db) ],
+    [    805,    806, (db) => addImageMagickSettings(db) ],
 ]
 
 const { v4: uuidv4 } = require('uuid');
@@ -143,6 +144,28 @@ function basicDB(db) {
             tunerCount: 2,
             autoDiscovery: true
         })
+    }
+    addImageMagickSettings(db);
+}
+
+/** Ensure imagemagick-settings document exists (empty path = auto-detect on PATH). */
+function addImageMagickSettings(db) {
+    try {
+        if (!db['imagemagick-settings']) {
+            return;
+        }
+        let rows = db['imagemagick-settings'].find();
+        if (!rows || rows.length === 0) {
+            db['imagemagick-settings'].save({
+                magickPath: '',
+            });
+            console.log('dizqueTV: created imagemagick-settings (default auto PATH)');
+        } else if (typeof rows[0].magickPath === 'undefined' || rows[0].magickPath === null) {
+            rows[0].magickPath = '';
+            db['imagemagick-settings'].update({ _id: rows[0]._id }, rows[0]);
+        }
+    } catch (e) {
+        console.error('dizqueTV: addImageMagickSettings failed', e.message || e);
     }
 }
 

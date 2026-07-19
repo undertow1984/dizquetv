@@ -24,7 +24,7 @@ function safeString(object) {
 }
 
 module.exports = { router: api }
-function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideService, _m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService ) {
+function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideService, _m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService ) {
     let m3uService = _m3uService;
     const router = express.Router()
     const plexServerDB = new PlexServerDB(channelService, fillerDB, customShowDB, db);
@@ -1149,6 +1149,96 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
 
 
     //HDHR SETTINGS
+    // ImageMagick settings (executable path for dynamic channel logos)
+    router.get('/api/imagemagick-settings', (req, res) => {
+      try {
+        if (!imagemagickSettingsService) {
+          return res.send({ magickPath: '' });
+        }
+        res.send(imagemagickSettingsService.get());
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+      }
+    });
+    router.put('/api/imagemagick-settings', (req, res) => {
+      try {
+        if (!imagemagickSettingsService) {
+          return res.status(500).send("ImageMagick settings unavailable");
+        }
+        let saved = imagemagickSettingsService.update(req.body || {});
+        eventService.push(
+          "settings-update",
+          {
+            "message": "ImageMagick configuration updated.",
+            "module": "imagemagick",
+            "detail": { "action": "update" },
+            "level": "info"
+          }
+        );
+        res.send(saved);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+        eventService.push(
+          "settings-update",
+          {
+            "message": "Error updating ImageMagick configuration.",
+            "module": "imagemagick",
+            "detail": {
+              "action": "update",
+              "error": safeString(err, "message"),
+            },
+            "level": "danger"
+          }
+        );
+      }
+    });
+    router.post('/api/imagemagick-settings', (req, res) => {
+      try {
+        if (!imagemagickSettingsService) {
+          return res.status(500).send("ImageMagick settings unavailable");
+        }
+        let saved = imagemagickSettingsService.reset();
+        eventService.push(
+          "settings-update",
+          {
+            "message": "ImageMagick configuration reset.",
+            "module": "imagemagick",
+            "detail": { "action": "reset" },
+            "level": "warning"
+          }
+        );
+        res.send(saved);
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+        eventService.push(
+          "settings-update",
+          {
+            "message": "Error resetting ImageMagick configuration.",
+            "module": "imagemagick",
+            "detail": {
+              "action": "reset",
+              "error": safeString(err, "message"),
+            },
+            "level": "danger"
+          }
+        );
+      }
+    });
+    router.post('/api/imagemagick-settings/test', (req, res) => {
+      try {
+        if (!imagemagickSettingsService) {
+          return res.send({ ok: false, error: "ImageMagick settings unavailable" });
+        }
+        res.send(imagemagickSettingsService.test(req.body || {}));
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ ok: false, error: err.message || String(err) });
+      }
+    });
+
     router.get('/api/hdhr-settings', (req, res) => {
       try {
         let hdhr = db['hdhr-settings'].find()[0]
