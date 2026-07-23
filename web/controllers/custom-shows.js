@@ -46,11 +46,20 @@ module.exports = function ($scope, $timeout, dizquetv, plex) {
         }
         if (typeof show !== 'undefined') {
             // not canceled
-            if ($scope.selectedChannelIndex == -1) { // add new show
-                await dizquetv.createShow(show);
-            } else {
-                $scope.shows[ $scope.selectedChannelIndex ].pending = true;
-                await dizquetv.updateShow(show.id, show);
+            try {
+                if ($scope.selectedChannelIndex == -1) { // add new show
+                    await dizquetv.createShow(show);
+                } else {
+                    $scope.shows[ $scope.selectedChannelIndex ].pending = true;
+                    await dizquetv.updateShow(show.id, show);
+                }
+            } catch (err) {
+                console.error('Could not save custom show', err);
+                let msg =
+                    (err && err.data && (err.data.error || err.data.message))
+                    || (err && err.message)
+                    || 'Failed to save custom show';
+                alert(msg);
             }
             await $scope.refreshShow();
         }

@@ -13,15 +13,11 @@
             ng-class="sourceFilter === 'jellyfin' ? 'btn-primary' : 'btn-outline-primary'"
             ng-click="setSourceFilter('jellyfin')"
             ng-disabled="isLibrarySectionLoading() || !hasJellyfin">Jellyfin</button>
-        <button type="button" class="btn" ng-if="!hideCustom"
-            ng-class="sourceFilter === 'custom' ? 'btn-primary' : 'btn-outline-primary'"
-            ng-click="setSourceFilter('custom')"
-            ng-disabled="isLibrarySectionLoading()">Custom</button>
     </div>
 </div>
 
-<div class="text-info small mb-2" ng-show="!isLibrarySectionLoading() && !hasPlex && !hasJellyfin && sourceFilter !== 'custom'">
-    Configure a Plex or Jellyfin server in <a href="/#!/settings">Settings</a><span ng-if="!hideCustom">, or choose <strong>Custom</strong></span>.
+<div class="text-info small mb-2" ng-show="!isLibrarySectionLoading() && !hasPlex && !hasJellyfin">
+    Configure a Plex or Jellyfin server in <a href="/#!/settings">Settings</a>, or add custom shows / lists under Library (listed under Playlists/Lists/Custom/Collections).
 </div>
 
 <div class="mb-2">
@@ -31,7 +27,7 @@
         <div class="library-content-loading" ng-show="isLibrarySectionLoading()">
             <span class="fa fa-spinner fa-spin"></span>
             <span ng-if="libraryCatalogLoading || !libraryCatalogReady">Loading library cache…</span>
-            <span ng-if="libraryCatalogReady && catalogLoading">Loading {{ sourceFilter === 'custom' ? 'custom programming' : (sourceFilter + ' libraries') }}…</span>
+            <span ng-if="libraryCatalogReady && catalogLoading">Loading {{ sourceFilter }} libraries…</span>
             <span ng-if="libraryCatalogReady && !catalogLoading && !_catalogBoundOnce">Loading libraries…</span>
         </div>
 
@@ -43,7 +39,7 @@
                         <span class="flex-pull-right small" style="display: flex; align-items: center; gap: 0.5rem;">
                             <button type="button"
                                 class="btn btn-sm btn-outline-primary"
-                                ng-if="panel.allowAddAll"
+                                ng-if="panel.allowAddAll !== false"
                                 ng-click="selectAllVisibleInPanel(panel)"
                                 ng-disabled="isLibrarySectionLoading() || panel.addingAll || visiblePanelCount(panel) === 0"
                                 title="Add all currently listed (filtered) items">
@@ -54,8 +50,8 @@
                                 </span>
                             </button>
                             <span class="text-muted">
-                                {{ panel.allowAddAll ? visiblePanelCount(panel) : panel.libraries.length }}
-                                <span ng-if="panel.allowAddAll && panel.filter && visiblePanelCount(panel) !== panel.libraries.length">
+                                {{ visiblePanelCount(panel) }}
+                                <span ng-if="(panel.filter || panel.summaryFilter) && visiblePanelCount(panel) !== panel.libraries.length">
                                     / {{ panel.libraries.length }}
                                 </span>
                             </span>
@@ -66,13 +62,22 @@
                             class="form-control form-control-sm"
                             placeholder="Search {{ panel.title | lowercase }}..."
                             ng-model="panel.filter"
-                            ng-model-options="{ debounce: 150 }"
+                            ng-model-options="{ debounce: 200 }"
                             ng-change="onPanelFilterChange(panel)"
                             ng-disabled="isLibrarySectionLoading()"
                             autocomplete="off" />
+                        <input type="search"
+                            class="form-control form-control-sm mt-1"
+                            placeholder="Search summary..."
+                            ng-model="panel.summaryFilter"
+                            ng-model-options="{ debounce: 350 }"
+                            ng-change="onPanelFilterChange(panel)"
+                            ng-disabled="isLibrarySectionLoading()"
+                            autocomplete="off"
+                            title="Filter by plot / summary (searches server library cache in memory)" />
                         <div class="small text-muted mt-1" ng-show="panel.searching">
                             <span class="fa fa-spinner fa-spin"></span>
-                            Searching library...
+                            Searching cache…
                         </div>
                     </div>
                     <div class="card-body p-0">
@@ -85,68 +90,75 @@
                                 {{ panel.emptyText }}
                             </li>
                             <li class="list-group-item text-muted small"
-                                ng-show="!panel.searching && !isLibrarySectionLoading() && panel.libraries.length &gt; 0 && !hasVisiblePanelItems(panel)">
+                                ng-show="!panel.searching && !isLibrarySectionLoading() && panel.libraries.length &gt; 0 && !(panel.visibleLibraries && panel.visibleLibraries.length)">
                                 No items match your search.
                             </li>
-                            <li class="list-group-item" ng-repeat="a in panel.libraries" ng-if="itemMatchesFilter(a, panel.filter, panel.topLevelSearchOnly, panel.allowCollections)">
+                            <li class="list-group-item" ng-repeat="a in panel.visibleLibraries track by libraryTrackKey(a)">
                                 <div class="flex-container library-item-hover {{ displayImages ? 'w_images' : 'wo_images' }}"
-                                    ng-click="isExpandableTopLevel(a) ? getNested(a) : selectTopLevelItem(a)">
+                                    ng-click="isExpandableTopLevel(a) ? getNested(a) : selectTopLevelItem(a, panel)">
                                     <span ng-if="isExpandableTopLevel(a)"
                                         class="fa {{ a.collapse ? 'fa-chevron-down' : 'fa-chevron-right' }} tab"></span>
                                     <img ng-if="displayImages" lazy-img="{{a.icon}}"></img>
                                     <span class="badge badge-secondary text-uppercase mr-1" style="font-size: 0.65rem;"
-                                        ng-if="a.source && (sourceFilter === 'all')">{{ a.source }}</span>
+                                        ng-if="a.source && sourceFilter === 'all' && a.type !== 'custom' && !a.customShow && a.type !== 'external-list' && !a.trackedList">{{ a.source }}</span>
+                                    <span class="badge badge-info text-uppercase mr-1" style="font-size: 0.65rem;"
+                                        ng-if="a.type === 'custom' || a.customShow">custom</span>
+                                    <span class="badge badge-warning text-uppercase mr-1" style="font-size: 0.65rem;"
+                                        ng-if="a.type === 'external-list' || a.trackedList || a.trackedListId">list</span>
                                     <span class="badge badge-light border text-uppercase mr-1" style="font-size: 0.65rem;"
-                                        ng-if="panel.allowCollections && a.type">{{ a.type }}</span>
+                                        ng-if="panel.allowCollections && a.type && a.type !== 'custom' && !a.customShow && a.type !== 'external-list' && !a.trackedList">{{ a.type }}</span>
                                     <span class="flex-grow-1">{{ displayTitle(a) }}</span>
                                     <span class="text-muted small" ng-if="a.type === 'movie' && a.durationStr">{{ a.durationStr }}</span>
-                                    <span class="text-muted small" ng-if="a.count != null && (a.type === 'playlist' || a.type === 'collection')"> ({{ a.count }})</span>
+                                    <span class="text-muted small" ng-if="a.count != null && (a.type === 'playlist' || a.type === 'collection' || a.type === 'custom' || a.customShow || a.type === 'external-list' || a.trackedList)"> ({{ a.count }})</span>
                                     <span class="text-muted small" ng-if="a.libraryTitle && !a.isLibraryNode"> — {{ a.libraryTitle }}</span>
                                     <span class="text-muted small" ng-if="a.serverName && sourceFilter === 'all'"> ({{ a.serverName }})</span>
-                                    <span ng-if="a.isLibraryNode || a.type === 'show' || a.type === 'movie' || a.type === 'artist' || a.type === 'playlist' || a.type === 'collection'"
+                                    <span ng-if="a.isLibraryNode || a.type === 'show' || a.type === 'movie' || a.type === 'artist' || a.type === 'playlist' || a.type === 'collection' || a.type === 'custom' || a.customShow || a.type === 'external-list' || a.trackedList || a.trackedListId"
                                         class="flex-pull-right"
-                                        ng-click='$event.stopPropagation(); selectTopLevelItem(a)'>
+                                        ng-click='$event.stopPropagation(); selectTopLevelItem(a, panel)'>
                                         <span class="fa fa-plus-circle btn"></span>
                                     </span>
                                 </div>
                                 <ul ng-if="a.collapse && isExpandableTopLevel(a)" class="list-group">
-                                    <li class="list-group-item {{ b.type !== 'movie' ? 'list-group-item-secondary' : 'list-group-item-video' }}"
+                                    <li class="list-group-item {{ isPlayableLibraryItem(b) ? 'list-group-item-video' : 'list-group-item-secondary' }}"
                                         ng-repeat="b in a.nested" ng-if="nestedMatchesFilter(b, panel)">
                                         <div class="flex-container library-item-hover"
-                                            ng-click="b.type !== 'movie' ? getNested(b) : selectItem(b, true)">
-                                            <span ng-if="b.type !== 'movie'" class="tab"></span>
-                                            <span ng-if="b.type !== 'movie'" class="fa {{ b.collapse ? 'fa-chevron-down' : 'fa-chevron-right' }} tab"></span>
+                                            ng-click="isPlayableLibraryItem(b) ? selectItem(b, true) : getNested(b)">
+                                            <span ng-if="!isPlayableLibraryItem(b)" class="tab"></span>
+                                            <span ng-if="!isPlayableLibraryItem(b)" class="fa {{ b.collapse ? 'fa-chevron-down' : 'fa-chevron-right' }} tab"></span>
                                             <img ng-if="displayImages" lazy-img="{{ b.type === 'episode' ? b.episodeIcon : b.icon }}"></img>
                                             <span class="flex-grow-1">{{ displayTitle(b) }}</span>
-                                            <span ng-if="b.type === 'movie'" class="">{{b.durationStr}}</span>
-                                            <span class="flex-pull-right" ng-if="b.type === 'movie'">
+                                            <span ng-if="isPlayableLibraryItem(b)" class="">{{ b.durationStr }}</span>
+                                            <span class="flex-pull-right" ng-if="isPlayableLibraryItem(b)">
                                                 <span class="fa fa-plus-circle btn"></span>
                                             </span>
-                                            <span ng-if="b.type === 'show' || b.type === 'genre' || b.type === 'artist'" class="flex-pull-right" ng-click="$event.stopPropagation(); selectShow(b);">
+                                            <span ng-if="b.type === 'show' || b.type === 'genre' || b.type === 'artist'" class="flex-pull-right" ng-click="$event.stopPropagation(); selectShow(b, panel);">
+                                                <span class="fa fa-plus-circle btn"></span>
+                                            </span>
+                                            <span ng-if="b.type === 'playlist' || b.type === 'collection'" class="flex-pull-right" ng-click="$event.stopPropagation(); selectPlaylist(b, panel);">
                                                 <span class="fa fa-plus-circle btn"></span>
                                             </span>
                                         </div>
-                                        <ul ng-if="b.collapse" class="list-group">
+                                        <ul ng-if="b.collapse && !isPlayableLibraryItem(b)" class="list-group">
                                             <li ng-repeat="c in b.nested"
                                                 ng-if="nestedMatchesFilter(c, panel)"
-                                                class="list-group-item {{ c.type !== 'movie' && c.type !== 'episode' && c.type !== 'track' ? 'list-group-item-dark' : 'list-group-item-video' }}">
+                                                class="list-group-item {{ isPlayableLibraryItem(c) ? 'list-group-item-video' : 'list-group-item-dark' }}">
                                                 <div class="flex-container library-item-hover"
-                                                    ng-click="c.type !== 'movie' && c.type !== 'episode' && c.type !== 'track' ? getNested(c) : selectItem(c, true)">
-                                                    <span ng-if="c.type !== 'movie' && c.type !== 'episode' && c.type !== 'track'" class="tab"></span>
-                                                    <span ng-if="c.type !== 'movie' && c.type !== 'episode' && c.type !== 'track'" class="tab"></span>
-                                                    <span ng-if="c.type !== 'movie' && c.type !== 'episode' && c.type !== 'track'"
+                                                    ng-click="isPlayableLibraryItem(c) ? selectItem(c, true) : getNested(c)">
+                                                    <span ng-if="!isPlayableLibraryItem(c)" class="tab"></span>
+                                                    <span ng-if="!isPlayableLibraryItem(c)" class="tab"></span>
+                                                    <span ng-if="!isPlayableLibraryItem(c)"
                                                         class="fa {{ c.collapse ? 'fa-chevron-down' : 'fa-chevron-right' }} tab"></span>
                                                     <img ng-if="displayImages" lazy-img="{{c.type === 'episode' ? c.episodeIcon : c.icon }}"></img>
                                                     <span class="flex-grow-1">{{ displayTitle(c) }}</span>
-                                                    <span ng-if="c.type === 'movie' || c.type === 'episode' || c.type === 'track'" class="">{{c.durationStr}}</span>
-                                                    <span ng-if="c.type === 'movie' || c.type === 'episode' || c.type === 'track'" class="flex-pull-right">
+                                                    <span ng-if="isPlayableLibraryItem(c)" class="">{{c.durationStr}}</span>
+                                                    <span ng-if="isPlayableLibraryItem(c)" class="flex-pull-right">
                                                         <span class="fa fa-plus-circle btn"></span>
                                                     </span>
-                                                    <span ng-if="c.type === 'season' || c.type === 'album'" class="flex-pull-right" ng-click="$event.stopPropagation(); selectSeason(c);">
+                                                    <span ng-if="c.type === 'season' || c.type === 'album'" class="flex-pull-right" ng-click="$event.stopPropagation(); selectSeason(c, panel);">
                                                         <span class="fa fa-plus-circle btn"></span>
                                                     </span>
                                                 </div>
-                                                <ul ng-if="c.collapse" class="list-group">
+                                                <ul ng-if="c.collapse && !isPlayableLibraryItem(c)" class="list-group">
                                                     <li class="list-group-item list-group-item-video"
                                                         ng-repeat="d in c.nested" ng-if="nestedMatchesFilter(d, panel)">
                                                         <div class="flex-container library-item-hover" ng-click="selectItem(d, true)">
@@ -167,62 +179,6 @@
                         </ul>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <div ng-show="!hideCustom && !isLibrarySectionLoading() && (sourceFilter === 'custom' || sourceFilter === 'all')" class="mt-2 library-content-panels">
-            <div class="card mb-2" ng-if="sourceFilter === 'all'">
-                <div class="card-header py-2">
-                    <strong>Custom Programming</strong>
-                    <span class="float-right small text-muted">{{ customShows.length }}</span>
-                </div>
-                <div class="px-2 py-2 border-bottom">
-                    <input type="search"
-                        class="form-control form-control-sm"
-                        placeholder="Search custom programming..."
-                        ng-model="contentFilter"
-                        ng-model-options="{ debounce: 100 }"
-                        ng-disabled="isLibrarySectionLoading()"
-                        autocomplete="off" />
-                </div>
-                <div class="card-body p-0">
-                    <ul class="list-group list-group-root plex-panel mb-0"
-                        style="max-height: 200px; overflow-y: auto;"
-                        lazy-img-container>
-                        <li class="list-group-item text-muted small" ng-show="customShows.length === 0">
-                            No custom programming found.
-                        </li>
-                        <li class="list-group-item" ng-repeat="x in customShows" ng-if="itemMatchesFilter(x, contentFilter)">
-                            <div class="flex-container" ng-click="addCustomShow(x);">
-                                <span class="fa fa-plus-circle tab"></span>
-                                <span class="badge badge-info text-uppercase mr-1" style="font-size: 0.65rem;">custom</span>
-                                <span>{{x.name || x.title}} ({{x.count}})</span>
-                            </div>
-                        </li>
-                    </ul>
-                </div>
-            </div>
-            <div ng-if="sourceFilter === 'custom'">
-                <div class="mb-2">
-                    <input type="search"
-                        class="form-control form-control-sm"
-                        placeholder="Search custom programming..."
-                        ng-model="contentFilter"
-                        ng-model-options="{ debounce: 100 }"
-                        ng-disabled="isLibrarySectionLoading()"
-                        autocomplete="off" />
-                </div>
-                <ul class="list-group list-group-root plex-panel" ng-init="setHeight = {'height': height + 'px'}" ng-style="setHeight" lazy-img-container>
-                    <li class="list-group-item text-muted small" ng-show="customShows.length === 0">
-                        No custom programming found. Create custom shows under Library → Custom Shows.
-                    </li>
-                    <li class="list-group-item" ng-repeat="x in customShows" ng-if="itemMatchesFilter(x, contentFilter)">
-                        <div class="flex-container" ng-click="addCustomShow(x);">
-                            <span class="fa fa-plus-circle tab"></span>
-                            <span>{{x.name || x.title}} ({{x.count}})</span>
-                        </div>
-                    </li>
-                </ul>
             </div>
         </div>
     </div>

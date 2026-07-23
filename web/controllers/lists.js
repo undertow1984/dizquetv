@@ -25,8 +25,10 @@ module.exports = function ($scope, $timeout, dizquetv) {
             saveAsCustomShow: false,
             pushToPlex: false,
             pushToJellyfin: false,
-            /** "serverName|sectionKey" */
-            plexLibraryRef: '',
+            /** "serverName|sectionKey" — Movies library */
+            plexMovieLibraryRef: '',
+            /** "serverName|sectionKey" — TV library */
+            plexTvLibraryRef: '',
         };
     }
 
@@ -38,10 +40,12 @@ module.exports = function ($scope, $timeout, dizquetv) {
     function parsePlexLibraryRef(ref) {
         ref = String(ref || '');
         let i = ref.indexOf('|');
-        if (i < 0) return { plexServerName: '', plexSectionKey: '', plexLibraryTitle: '' };
+        if (i < 0) {
+            return { serverName: null, sectionKey: null, libraryTitle: null };
+        }
         let serverName = ref.slice(0, i);
         let sectionKey = ref.slice(i + 1);
-        let title = '';
+        let title = null;
         for (let j = 0; j < $scope.plexLibraries.length; j++) {
             let lib = $scope.plexLibraries[j];
             if (lib.serverName === serverName && String(lib.sectionKey) === String(sectionKey)) {
@@ -50,9 +54,38 @@ module.exports = function ($scope, $timeout, dizquetv) {
             }
         }
         return {
-            plexServerName: serverName,
-            plexSectionKey: sectionKey,
-            plexLibraryTitle: title,
+            serverName: serverName || null,
+            sectionKey: sectionKey || null,
+            libraryTitle: title,
+        };
+    }
+
+    function plexMovieLibraries() {
+        return ($scope.plexLibraries || []).filter((l) => !l.type || l.type === 'movie');
+    }
+    function plexTvLibraries() {
+        return ($scope.plexLibraries || []).filter((l) => l.type === 'show');
+    }
+    $scope.plexMovieLibraries = plexMovieLibraries;
+    $scope.plexTvLibraries = plexTvLibraries;
+
+    function plexFieldsFromForm(form) {
+        form = form || {};
+        let movie = parsePlexLibraryRef(form.plexMovieLibraryRef);
+        let tv = parsePlexLibraryRef(form.plexTvLibraryRef);
+        return {
+            plexMovieServerName: movie.serverName,
+            plexMovieSectionKey: movie.sectionKey,
+            plexMovieLibraryTitle: movie.libraryTitle,
+            plexMovieLibraryRef: form.plexMovieLibraryRef || '',
+            plexTvServerName: tv.serverName,
+            plexTvSectionKey: tv.sectionKey,
+            plexTvLibraryTitle: tv.libraryTitle,
+            plexTvLibraryRef: form.plexTvLibraryRef || '',
+            // legacy aliases
+            plexServerName: movie.serverName,
+            plexSectionKey: movie.sectionKey,
+            plexLibraryTitle: movie.libraryTitle,
         };
     }
 
@@ -119,9 +152,15 @@ module.exports = function ($scope, $timeout, dizquetv) {
         $scope.form = emptyForm();
         $scope.form.pushToPlex = false;
         $scope.form.pushToJellyfin = false;
-        $scope.form.plexLibraryRef =
-            $scope.plexLibraries.length === 1
-                ? plexLibraryRefValue($scope.plexLibraries[0].serverName, $scope.plexLibraries[0].sectionKey)
+        let movies = plexMovieLibraries();
+        let tvs = plexTvLibraries();
+        $scope.form.plexMovieLibraryRef =
+            movies.length === 1
+                ? plexLibraryRefValue(movies[0].serverName, movies[0].sectionKey)
+                : '';
+        $scope.form.plexTvLibraryRef =
+            tvs.length === 1
+                ? plexLibraryRefValue(tvs[0].serverName, tvs[0].sectionKey)
                 : '';
         $scope.error = '';
         $scope.status = '';
@@ -149,17 +188,21 @@ module.exports = function ($scope, $timeout, dizquetv) {
             return;
         }
         let pushToPlex = !!$scope.form.pushToPlex && $scope.hasPlex;
-        if (pushToPlex && !($scope.form.plexLibraryRef || '').trim()) {
-            $scope.error = 'Select a Plex library for the playlist.';
+        if (
+            pushToPlex
+            && !($scope.form.plexMovieLibraryRef || '').trim()
+            && !($scope.form.plexTvLibraryRef || '').trim()
+        ) {
+            $scope.error = 'Select a Plex Movies and/or TV library for the playlist.';
             return;
         }
-        let plexLib = parsePlexLibraryRef($scope.form.plexLibraryRef);
+        let plexFields = pushToPlex ? plexFieldsFromForm($scope.form) : {};
         $scope.busy = true;
         $scope.error = '';
         $scope.status = 'Fetching list and matching against library cache…';
         $timeout();
         try {
-            let created = await dizquetv.createTrackedList({
+            let created = await dizquetv.createTrackedList(Object.assign({
                 name: name,
                 url: url,
                 text: text,
@@ -167,11 +210,7 @@ module.exports = function ($scope, $timeout, dizquetv) {
                 saveAsCustomShow: $scope.form.saveAsCustomShow === true,
                 pushToPlex: pushToPlex,
                 pushToJellyfin: !!$scope.form.pushToJellyfin && $scope.hasJellyfin,
-                plexServerName: pushToPlex ? plexLib.plexServerName : null,
-                plexSectionKey: pushToPlex ? plexLib.plexSectionKey : null,
-                plexLibraryTitle: pushToPlex ? plexLib.plexLibraryTitle : null,
-                plexLibraryRef: pushToPlex ? $scope.form.plexLibraryRef : null,
-            });
+            }, plexFields));
             $scope.status =
                 'Added “' + name + '” — matched ' +
                 (created.matchedCount || 0) + ' of ' + (created.itemCount || 0) +
@@ -207,6 +246,8 @@ module.exports = function ($scope, $timeout, dizquetv) {
             $scope.selected = await dizquetv.getTrackedList(id);
             $scope.edit = {
                 name: ($scope.selected && $scope.selected.name) || '',
+                url: ($scope.selected && $scope.selected.url) || '',
+                text: ($scope.selected && $scope.selected.text) || '',
                 channelNumber:
                     $scope.selected && $scope.selected.channelNumber != null
                         ? $scope.selected.channelNumber
@@ -218,9 +259,13 @@ module.exports = function ($scope, $timeout, dizquetv) {
                 saveAsCustomShow: !!( $scope.selected && $scope.selected.saveAsCustomShow ),
                 pushToPlex: !!( $scope.selected && $scope.selected.pushToPlex ),
                 pushToJellyfin: !!( $scope.selected && $scope.selected.pushToJellyfin ),
-                plexLibraryRef: plexLibraryRefValue(
-                    $scope.selected && $scope.selected.plexServerName,
-                    $scope.selected && $scope.selected.plexSectionKey
+                plexMovieLibraryRef: plexLibraryRefValue(
+                    $scope.selected && ($scope.selected.plexMovieServerName || $scope.selected.plexServerName),
+                    $scope.selected && ($scope.selected.plexMovieSectionKey || $scope.selected.plexSectionKey)
+                ),
+                plexTvLibraryRef: plexLibraryRefValue(
+                    $scope.selected && $scope.selected.plexTvServerName,
+                    $scope.selected && $scope.selected.plexTvSectionKey
                 ),
             };
         } catch (err) {
@@ -258,12 +303,31 @@ module.exports = function ($scope, $timeout, dizquetv) {
         }
         let pushToPlex = !!( $scope.edit && $scope.edit.pushToPlex && $scope.hasPlex );
         let pushToJellyfin = !!( $scope.edit && $scope.edit.pushToJellyfin && $scope.hasJellyfin );
-        if (pushToPlex && !($scope.edit.plexLibraryRef || '').trim()) {
-            $scope.error = 'Select a Plex library for the playlist.';
+        if (
+            pushToPlex
+            && !($scope.edit.plexMovieLibraryRef || '').trim()
+            && !($scope.edit.plexTvLibraryRef || '').trim()
+        ) {
+            $scope.error = 'Select a Plex Movies and/or TV library for the playlist.';
             return;
         }
-        let plexLib = parsePlexLibraryRef($scope.edit.plexLibraryRef);
+        let plexFields = pushToPlex ? plexFieldsFromForm($scope.edit) : {
+            plexMovieServerName: null,
+            plexMovieSectionKey: null,
+            plexMovieLibraryTitle: null,
+            plexTvServerName: null,
+            plexTvSectionKey: null,
+            plexTvLibraryTitle: null,
+            plexServerName: null,
+            plexSectionKey: null,
+            plexLibraryTitle: null,
+        };
         let nowPush = pushToPlex || pushToJellyfin;
+        let url = ($scope.edit && $scope.edit.url ? String($scope.edit.url) : '').trim();
+        let text = $scope.edit && typeof $scope.edit.text === 'string' ? $scope.edit.text : '';
+        let prevUrl = ($scope.selected.url || '').trim();
+        let prevText = $scope.selected.text || '';
+        let sourceChanged = url !== prevUrl || text !== prevText;
 
         $scope.busy = true;
         $scope.error = '';
@@ -275,23 +339,30 @@ module.exports = function ($scope, $timeout, dizquetv) {
             let needRefresh =
                 nowPush
                 || saveAsCustomShow
+                || sourceChanged
                 || (createChannel && channelNumber == null);
 
-            let updated = await dizquetv.updateTrackedList($scope.selected.id, {
-                name: name,
-                channelNumber: channelNumber,
-                createChannel: createChannel,
-                saveAsCustomShow: saveAsCustomShow,
-                pushToPlex: pushToPlex,
-                pushToJellyfin: pushToJellyfin,
-                plexServerName: pushToPlex ? plexLib.plexServerName : null,
-                plexSectionKey: pushToPlex ? plexLib.plexSectionKey : null,
-                plexLibraryTitle: pushToPlex ? plexLib.plexLibraryTitle : null,
-                plexLibraryRef: pushToPlex ? $scope.edit.plexLibraryRef : null,
-            });
-            // Refresh to create/update channel, custom show, and/or media playlists
+            let updated = await dizquetv.updateTrackedList(
+                $scope.selected.id,
+                Object.assign(
+                    {
+                        name: name,
+                        url: url,
+                        text: text,
+                        channelNumber: channelNumber,
+                        createChannel: createChannel,
+                        saveAsCustomShow: saveAsCustomShow,
+                        pushToPlex: pushToPlex,
+                        pushToJellyfin: pushToJellyfin,
+                    },
+                    plexFields
+                )
+            );
+            // Refresh to re-match (if source changed) and/or update channel / playlists
             if (needRefresh) {
-                $scope.status = 'Updating channel / custom show / playlists…';
+                $scope.status = sourceChanged
+                    ? 'Re-matching list and updating channel / playlists…'
+                    : 'Updating channel / custom show / playlists…';
                 $timeout();
                 updated = await dizquetv.refreshTrackedList(updated.id, {
                     syncChannel: true,
@@ -302,21 +373,43 @@ module.exports = function ($scope, $timeout, dizquetv) {
             $scope.selected = updated;
             $scope.edit = {
                 name: updated.name,
+                url: updated.url || '',
+                text: updated.text || '',
                 channelNumber: updated.channelNumber != null ? updated.channelNumber : null,
                 createChannel: !!(updated.createChannel || updated.channelNumber != null),
                 saveAsCustomShow: !!updated.saveAsCustomShow,
                 pushToPlex: !!updated.pushToPlex,
                 pushToJellyfin: !!updated.pushToJellyfin,
-                plexLibraryRef: plexLibraryRefValue(updated.plexServerName, updated.plexSectionKey),
+                plexMovieLibraryRef: plexLibraryRefValue(
+                    updated.plexMovieServerName || updated.plexServerName,
+                    updated.plexMovieSectionKey || updated.plexSectionKey
+                ),
+                plexTvLibraryRef: plexLibraryRefValue(
+                    updated.plexTvServerName,
+                    updated.plexTvSectionKey
+                ),
             };
+            let plexStatus = '';
+            if (updated.pushToPlex) {
+                let bits = [];
+                if (updated.plexMovieLibraryTitle || updated.plexMovieSectionKey || updated.plexLibraryTitle) {
+                    bits.push(
+                        'Movies: ' +
+                        (updated.plexMovieLibraryTitle || updated.plexLibraryTitle || updated.plexMovieSectionKey)
+                    );
+                }
+                if (updated.plexTvLibraryTitle || updated.plexTvSectionKey) {
+                    bits.push('TV: ' + (updated.plexTvLibraryTitle || updated.plexTvSectionKey));
+                }
+                plexStatus = bits.length ? ' · Plex ' + bits.join(', ') : ' · Plex playlist';
+            }
             $scope.status =
                 'Saved “' + updated.name + '”' +
                 (updated.channelNumber != null ? ' · channel #' + updated.channelNumber : '') +
                 (updated.customShowId ? ' · custom show' : '') +
-                (updated.pushToPlex
-                    ? ' · Plex: ' + (updated.plexLibraryTitle || updated.plexSectionKey)
-                    : '') +
+                plexStatus +
                 (updated.pushToJellyfin ? ' · Jellyfin playlist' : '') +
+                (sourceChanged ? ' · re-matched' : '') +
                 '.';
             await $scope.refreshList();
         } catch (err) {

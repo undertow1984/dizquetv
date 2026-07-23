@@ -52,23 +52,23 @@
                     <div class="form-group mt-1 mb-2">
                         <label class='form-label'>Content Sources</label>
                         <p class="small text-muted mb-2">
-                            Plex/Jellyfin playlists &amp; collections, TV shows, and custom programming.
-                            Check items to link them as content sources.
+                            Plex/Jellyfin playlists &amp; collections, TV shows, custom shows, and Library → Lists
+                            (under Playlists/Lists/Custom/Collections). Check items to link them as content sources.
                             <strong>Refresh programming from selected</strong> and <strong>Update Channel</strong> re-import
                             linked sources, keep the current programming order, add only new items, keep manual programs,
                             and remove duplicates (same logic as Programming → Duplicates).
                         </p>
                         <div class="btn-group btn-group-sm mb-2" role="group" aria-label="Content source media filter">
                             <button type="button" class="btn"
-                                ng-class="contentSourceMediaFilter === 'all' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-class="contentSourceUi.mediaFilter === 'all' ? 'btn-primary' : 'btn-outline-primary'"
                                 ng-click="setContentSourceMediaFilter('all')"
                                 ng-disabled="isContentSourcesSectionLoading()">All</button>
                             <button type="button" class="btn"
-                                ng-class="contentSourceMediaFilter === 'plex' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-class="contentSourceUi.mediaFilter === 'plex' ? 'btn-primary' : 'btn-outline-primary'"
                                 ng-click="setContentSourceMediaFilter('plex')"
                                 ng-disabled="isContentSourcesSectionLoading()">Plex</button>
                             <button type="button" class="btn"
-                                ng-class="contentSourceMediaFilter === 'jellyfin' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-class="contentSourceUi.mediaFilter === 'jellyfin' ? 'btn-primary' : 'btn-outline-primary'"
                                 ng-click="setContentSourceMediaFilter('jellyfin')"
                                 ng-disabled="isContentSourcesSectionLoading()">Jellyfin</button>
                         </div>
@@ -81,13 +81,13 @@
                         <div class="text-danger small" ng-show="contentSourcesError && !isContentSourcesSectionLoading()">{{ contentSourcesError }}</div>
 
                         <div class="row content-sources-panels" ng-show="!isContentSourcesSectionLoading()">
-                            <div class="col-md-4 mb-2">
+                            <div class="col-md-6 mb-2">
                                 <div class="card">
                                     <div class="card-header py-2 flex-container" style="align-items: center;">
-                                        <strong>Playlists &amp; Collections</strong>
+                                        <strong>Playlists/Lists/Custom/Collections</strong>
                                         <span class="flex-pull-right small text-muted">
-                                            {{ contentSourceFilteredCount(contentSourceLists) }} shown
-                                            <span ng-if="contentSourceMediaFilter !== 'all'">
+                                            {{ contentSourceListsVisible.length }} shown
+                                            <span ng-if="contentSourceUi.listFilter || contentSourceUi.mediaFilter !== 'all'">
                                                 / {{ contentSourceLists.length }}
                                             </span>
                                         </span>
@@ -95,31 +95,36 @@
                                     <div class="px-2 py-2 border-bottom">
                                         <input type="search"
                                             class="form-control form-control-sm"
-                                            placeholder="Search playlists &amp; collections..."
-                                            ng-model="contentSourceListFilter"
+                                            placeholder="Search playlists, lists, custom, collections…"
+                                            ng-model="contentSourceUi.listFilter"
                                             ng-model-options="{ debounce: 100 }"
+                                            ng-change="onContentSourceSearchChange()"
                                             autocomplete="off" />
                                     </div>
                                     <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
-                                        <div ng-show="contentSourceFilteredCount(contentSourceLists) === 0" class="p-3 text-muted small">
-                                            No playlists or collections found.
+                                        <div ng-show="contentSourceLists.length === 0" class="p-3 text-muted small">
+                                            No playlists, lists, custom shows, or collections found.
                                         </div>
-                                        <div ng-show="contentSourceFilteredCount(contentSourceLists) &gt; 0 && (contentSourceLists | filter:contentSourceMediaFilterFn | filter:contentSourceListFilter).length === 0"
+                                        <div ng-show="contentSourceLists.length &gt; 0 && contentSourceListsVisible.length === 0"
                                             class="p-3 text-muted small">
-                                            No playlists or collections match your search.
+                                            No playlists, lists, custom shows, or collections match your search.
                                         </div>
                                         <div class="list-group list-group-flush">
                                             <label class="list-group-item list-group-item-action mb-0 py-2"
                                                 style="cursor: pointer;"
-                                                ng-repeat="p in contentSourceLists | filter:contentSourceMediaFilterFn | filter:contentSourceListFilter track by ((p.mediaSource || 'plex') + '-' + p.type + '-' + p.serverName + '-' + p.key + '-' + (p.libraryTitle || ''))">
+                                                ng-repeat="p in contentSourceListsVisible track by contentSourceListTrackKey(p)">
                                                 <input type="checkbox"
                                                     ng-model="p.selected"
                                                     ng-change="onContentSourceCheckChange()"
                                                     style="margin-right: 0.5rem;" />
                                                 <span class="badge badge-secondary text-uppercase" style="font-size: 0.65rem;"
-                                                    ng-if="p.mediaSource">{{ p.mediaSource }}</span>
+                                                    ng-if="p.mediaSource && p.type !== 'custom' && p.type !== 'external-list'">{{ p.mediaSource }}</span>
+                                                <span class="badge badge-info text-uppercase" style="font-size: 0.65rem;"
+                                                    ng-if="p.type === 'custom'">custom</span>
+                                                <span class="badge badge-warning text-uppercase" style="font-size: 0.65rem;"
+                                                    ng-if="p.type === 'external-list' || p.trackedListId">list</span>
                                                 <span class="badge badge-light border text-uppercase" style="font-size: 0.65rem;"
-                                                    ng-if="p.type">{{ p.type }}</span>
+                                                    ng-if="p.type && p.type !== 'custom' && p.type !== 'external-list'">{{ p.type }}</span>
                                                 {{ p.title }}
                                                 <span ng-if="p.count !== null && p.count !== undefined"> ({{ p.count }})</span>
                                                 <span class="text-muted small" ng-if="p.libraryTitle"> — {{ p.libraryTitle }}</span>
@@ -129,13 +134,13 @@
                                     </div>
                                 </div>
                             </div>
-                            <div class="col-md-4 mb-2">
+                            <div class="col-md-6 mb-2">
                                 <div class="card">
                                     <div class="card-header py-2 flex-container" style="align-items: center;">
                                         <strong>TV Shows</strong>
                                         <span class="flex-pull-right small text-muted">
-                                            {{ contentSourceFilteredCount(contentSourceShows) }} shown
-                                            <span ng-if="contentSourceMediaFilter !== 'all'">
+                                            {{ contentSourceShowsVisible.length }} shown
+                                            <span ng-if="contentSourceUi.showFilter || contentSourceUi.mediaFilter !== 'all'">
                                                 / {{ contentSourceShows.length }}
                                             </span>
                                         </span>
@@ -144,22 +149,23 @@
                                         <input type="search"
                                             class="form-control form-control-sm"
                                             placeholder="Search TV shows..."
-                                            ng-model="contentSourceShowFilter"
+                                            ng-model="contentSourceUi.showFilter"
                                             ng-model-options="{ debounce: 100 }"
+                                            ng-change="onContentSourceSearchChange()"
                                             autocomplete="off" />
                                     </div>
                                     <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
-                                        <div ng-show="contentSourceFilteredCount(contentSourceShows) === 0" class="p-3 text-muted small">
+                                        <div ng-show="contentSourceShows.length === 0" class="p-3 text-muted small">
                                             No TV shows found (or all show libraries are disabled).
                                         </div>
-                                        <div ng-show="contentSourceFilteredCount(contentSourceShows) &gt; 0 && (contentSourceShows | filter:contentSourceMediaFilterFn | filter:contentSourceShowFilter).length === 0"
+                                        <div ng-show="contentSourceShows.length &gt; 0 && contentSourceShowsVisible.length === 0"
                                             class="p-3 text-muted small">
                                             No TV shows match your search.
                                         </div>
                                         <div class="list-group list-group-flush">
                                             <label class="list-group-item list-group-item-action mb-0 py-2"
                                                 style="cursor: pointer;"
-                                                ng-repeat="s in contentSourceShows | filter:contentSourceMediaFilterFn | filter:contentSourceShowFilter track by ((s.mediaSource || 'plex') + '-' + s.serverName + '-' + s.key + '-' + (s.libraryTitle || ''))">
+                                                ng-repeat="s in contentSourceShowsVisible track by contentSourceShowTrackKey(s)">
                                                 <input type="checkbox"
                                                     ng-model="s.selected"
                                                     ng-change="onContentSourceCheckChange()"
@@ -171,46 +177,6 @@
                                                 <span ng-if="(s.seasonCount == null || s.episodeCount == null) && s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
                                                 <span class="text-muted small" ng-if="s.libraryTitle"> — {{ s.libraryTitle }}</span>
                                                 <span class="text-muted small" ng-if="s.serverName"> ({{ s.serverName }})</span>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="col-md-4 mb-2">
-                                <div class="card">
-                                    <div class="card-header py-2 flex-container" style="align-items: center;">
-                                        <strong>Custom Programming</strong>
-                                        <span class="flex-pull-right small text-muted">
-                                            {{ contentSourceCustomShows.length }} shown
-                                        </span>
-                                    </div>
-                                    <div class="px-2 py-2 border-bottom">
-                                        <input type="search"
-                                            class="form-control form-control-sm"
-                                            placeholder="Search custom programming..."
-                                            ng-model="contentSourceCustomFilter"
-                                            ng-model-options="{ debounce: 100 }"
-                                            autocomplete="off" />
-                                    </div>
-                                    <div class="card-body p-0" style="max-height: 240px; overflow-y: auto;">
-                                        <div ng-show="contentSourceCustomShows.length === 0" class="p-3 text-muted small">
-                                            No custom programming found. Create custom shows under Library → Custom Shows.
-                                        </div>
-                                        <div ng-show="contentSourceCustomShows.length &gt; 0 && (contentSourceCustomShows | filter:contentSourceCustomFilter).length === 0"
-                                            class="p-3 text-muted small">
-                                            No custom programming matches your search.
-                                        </div>
-                                        <div class="list-group list-group-flush">
-                                            <label class="list-group-item list-group-item-action mb-0 py-2"
-                                                style="cursor: pointer;"
-                                                ng-repeat="c in contentSourceCustomShows | filter:contentSourceCustomFilter track by c.key">
-                                                <input type="checkbox"
-                                                    ng-model="c.selected"
-                                                    ng-change="onContentSourceCheckChange()"
-                                                    style="margin-right: 0.5rem;" />
-                                                <span class="badge badge-info text-uppercase" style="font-size: 0.65rem;">custom</span>
-                                                {{ c.title }}
-                                                <span ng-if="c.count !== null && c.count !== undefined"> ({{ c.count }})</span>
                                             </label>
                                         </div>
                                     </div>

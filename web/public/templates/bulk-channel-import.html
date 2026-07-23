@@ -7,8 +7,8 @@
                 </div>
                 <div class="modal-body">
                     <p class="small text-muted">
-                        Select Plex/Jellyfin playlists &amp; collections, TV shows, and custom programming
-                        (same content resources as channel Properties).
+                        Select movie libraries, playlists &amp; collections (including custom shows), and TV shows
+                        from your synced library cache (same idea as Create Custom Show).
                         If that channel already exists, its programming is <strong>updated</strong> (duplicates removed, order randomized)
                         instead of creating a new channel. Content sources are saved on the channel for later re-sync.
                     </p>
@@ -29,7 +29,7 @@
                         </small>
                     </div>
 
-                    <div ng-show="servers.length === 0 && customShows.length === 0 && !loading" class="text-info">
+                    <div ng-show="servers.length === 0 && lists.length === 0 && !loading" class="text-info">
                         Configure a Plex or Jellyfin server in
                         <a href="/#!/settings">Settings</a>, or create custom shows under
                         <a href="/#!/library">Library</a> first.
@@ -52,55 +52,103 @@
                                 ng-disabled="loading || importing">Jellyfin</button>
                         </div>
                         <small class="form-text text-muted">
-                            Same catalog as channel Content Sources: playlists &amp; collections, TV shows, and custom programming.
+                            Movies, TV shows, and playlists/collections from cache. Custom shows and Library → Lists always appear under Playlists/Lists/Custom/Collections.
                         </small>
                     </div>
 
                     <div class="loader" ng-show="loading"></div>
 
-                    <div class="row" ng-show="!loading && (servers.length &gt; 0 || customShows.length &gt; 0)">
+                    <div class="row" ng-show="!loading && (servers.length &gt; 0 || lists.length &gt; 0)">
                         <div class="col-md-4">
                             <div class="card mb-3">
                                 <div class="card-header flex-container" style="align-items: center;">
-                                    <strong>Playlists &amp; Collections</strong>
-                                    <span class="flex-pull-right small">
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, true)" ng-disabled="importing || lists.length === 0">Select all</button>
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, false)" ng-disabled="importing || lists.length === 0">None</button>
+                                    <strong>Movies</strong>
+                                    <span class="flex-pull-right small" style="display: flex; align-items: center; gap: 0.5rem;">
+                                        <button type="button"
+                                            class="btn btn-sm btn-outline-primary"
+                                            ng-click="selectAllVisibleMovies()"
+                                            ng-disabled="importing || movies.length === 0 || movieSearching || visibleMovieLibCount() === 0"
+                                            title="Select only movies matching the current filters">
+                                            <span class="fa fa-spinner fa-spin" ng-show="movieSearching"></span>
+                                            <span ng-show="!movieSearching">Add all</span>
+                                        </button>
                                     </span>
                                 </div>
                                 <div class="px-2 py-2 border-bottom">
                                     <input type="search"
                                         class="form-control form-control-sm"
-                                        placeholder="Search playlists &amp; collections..."
-                                        ng-model="listFilter"
-                                        ng-model-options="{ debounce: 100 }"
+                                        placeholder="Search movies..."
+                                        ng-model="movieFilter"
+                                        ng-model-options="{ debounce: 200 }"
+                                        ng-change="onMovieFilterChange()"
                                         ng-disabled="importing"
                                         autocomplete="off" />
-                                </div>
-                                <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
-                                    <div ng-show="lists.length === 0" class="p-3 text-muted small">No playlists or collections found.</div>
-                                    <div ng-show="lists.length &gt; 0 && (lists | filter:listFilter).length === 0"
-                                        class="p-3 text-muted small">No playlists or collections match your search.</div>
-                                    <div class="list-group list-group-flush">
-                                        <label class="list-group-item list-group-item-action mb-0"
-                                            style="cursor: pointer;"
-                                            ng-repeat="p in lists | filter:listFilter track by ((p.mediaSource || 'plex') + '-' + p.type + '-' + p.serverName + '-' + p.key + '-' + (p.libraryTitle || ''))">
-                                            <input type="checkbox"
-                                                ng-model="p.selected"
-                                                ng-disabled="importing"
-                                                style="margin-right: 0.5rem;" />
-                                            <span class="badge badge-secondary text-uppercase" style="font-size: 0.65rem;"
-                                                ng-if="p.mediaSource">{{ p.mediaSource }}</span>
-                                            <span class="badge badge-light border text-uppercase" style="font-size: 0.65rem;"
-                                                ng-if="p.type">{{ p.type }}</span>
-                                            {{ p.title }}<span ng-if="p.count !== null && p.count !== undefined"> ({{ p.count }})</span>
-                                            <span class="text-muted small" ng-if="p.libraryTitle"> — {{ p.libraryTitle }}</span>
-                                            <span class="text-muted small" ng-if="p.serverName"> ({{ p.serverName }})</span>
-                                        </label>
+                                    <input type="search"
+                                        class="form-control form-control-sm mt-1"
+                                        placeholder="Search summary..."
+                                        ng-model="movieSummaryFilter"
+                                        ng-model-options="{ debounce: 350 }"
+                                        ng-change="onMovieFilterChange()"
+                                        ng-disabled="importing"
+                                        autocomplete="off"
+                                        title="Filter by plot / summary (server library cache)" />
+                                    <div class="small text-muted mt-1" ng-show="movieSearching">
+                                        <span class="fa fa-spinner fa-spin"></span>
+                                        Searching cache…
                                     </div>
                                 </div>
+                                <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
+                                    <div ng-show="movies.length === 0" class="p-3 text-muted small">No movie libraries found (sync libraries under Library → Management).</div>
+                                    <div ng-show="movies.length &gt; 0 && visibleMovieLibCount() === 0"
+                                        class="p-3 text-muted small">No movies match your search.</div>
+                                    <ul class="list-group list-group-flush list-group-root mb-0">
+                                        <li class="list-group-item p-0"
+                                            ng-repeat="lib in movies track by ((lib.mediaSource || 'plex') + '-' + lib.serverName + '-' + lib.key)"
+                                            ng-if="movieLibVisible(lib)">
+                                            <div class="flex-container library-item-hover px-3 py-2"
+                                                style="align-items: center; cursor: pointer;"
+                                                ng-click="toggleMovieLibrary(lib)">
+                                                <span class="fa {{ lib.collapse ? 'fa-chevron-down' : 'fa-chevron-right' }} tab"
+                                                    style="width: 1.25rem; text-align: center;"></span>
+                                                <span class="badge badge-secondary text-uppercase mr-1" style="font-size: 0.65rem;"
+                                                    ng-if="lib.mediaSource && mediaSourceFilter === 'all'">{{ lib.mediaSource }}</span>
+                                                <span class="flex-grow-1">{{ lib.title }}</span>
+                                                <span class="text-muted small" ng-if="lib.serverName && mediaSourceFilter === 'all'"> ({{ lib.serverName }})</span>
+                                                <span class="fa fa-spinner fa-spin text-muted ml-1" ng-show="lib.loadingNested"></span>
+                                                <span class="flex-pull-right"
+                                                    ng-click="$event.stopPropagation(); addFilteredMoviesInLibrary(lib)"
+                                                    title="Select only filtered movies in this library">
+                                                    <span class="fa fa-plus-circle btn"></span>
+                                                </span>
+                                            </div>
+                                            <ul class="list-group list-group-flush mb-0" ng-if="lib.collapse">
+                                                <li class="list-group-item list-group-item-video py-1 pl-4"
+                                                    ng-repeat="mov in lib.nested track by (mov.ratingKey || mov.key || $index)"
+                                                    ng-if="movieChildVisible(mov)">
+                                                    <label class="mb-0 d-flex align-items-center" style="cursor: pointer; font-weight: normal;">
+                                                        <input type="checkbox"
+                                                            ng-model="mov.selected"
+                                                            ng-disabled="importing"
+                                                            style="margin-right: 0.5rem;" />
+                                                        <span class="flex-grow-1">{{ movieDisplayTitle(mov) }}</span>
+                                                        <span class="text-muted small" ng-if="mov.durationStr">{{ mov.durationStr }}</span>
+                                                    </label>
+                                                </li>
+                                                <li class="list-group-item py-1 pl-4 text-muted small"
+                                                    ng-if="lib.nested && lib.nested.length && !lib.nested.length">
+                                                </li>
+                                                <li class="list-group-item py-1 pl-4 text-muted small"
+                                                    ng-if="lib.nested && lib.nested.length === 0">
+                                                    No movies in this library.
+                                                </li>
+                                            </ul>
+                                        </li>
+                                    </ul>
+                                </div>
                                 <div class="card-footer small text-muted">
-                                    {{ selectedCount(lists) }} selected · {{ lists.length }} total
+                                    {{ selectedMovieCount() }} selected
+                                    · {{ visibleMovieLibCount() }} libraries shown
+                                    <span ng-if="movies.length !== visibleMovieLibCount()"> / {{ movies.length }}</span>
                                 </div>
                             </div>
                         </div>
@@ -150,40 +198,49 @@
                         <div class="col-md-4">
                             <div class="card mb-3">
                                 <div class="card-header flex-container" style="align-items: center;">
-                                    <strong>Custom Programming</strong>
+                                    <strong>Playlists/Lists/Custom/Collections</strong>
                                     <span class="flex-pull-right small">
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(customShows, true)" ng-disabled="importing || customShows.length === 0">Select all</button>
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(customShows, false)" ng-disabled="importing || customShows.length === 0">None</button>
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, true)" ng-disabled="importing || lists.length === 0">Select all</button>
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, false)" ng-disabled="importing || lists.length === 0">None</button>
                                     </span>
                                 </div>
                                 <div class="px-2 py-2 border-bottom">
                                     <input type="search"
                                         class="form-control form-control-sm"
-                                        placeholder="Search custom programming..."
-                                        ng-model="customFilter"
+                                        placeholder="Search playlists, lists, custom, collections…"
+                                        ng-model="listFilter"
                                         ng-model-options="{ debounce: 100 }"
                                         ng-disabled="importing"
                                         autocomplete="off" />
                                 </div>
                                 <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
-                                    <div ng-show="customShows.length === 0" class="p-3 text-muted small">No custom programming found. Create custom shows under Library → Custom Shows.</div>
-                                    <div ng-show="customShows.length &gt; 0 && (customShows | filter:customFilter).length === 0"
-                                        class="p-3 text-muted small">No custom programming matches your search.</div>
+                                    <div ng-show="lists.length === 0" class="p-3 text-muted small">No playlists, lists, custom shows, or collections found.</div>
+                                    <div ng-show="lists.length &gt; 0 && (lists | filter:listFilter).length === 0"
+                                        class="p-3 text-muted small">No items match your search.</div>
                                     <div class="list-group list-group-flush">
                                         <label class="list-group-item list-group-item-action mb-0"
                                             style="cursor: pointer;"
-                                            ng-repeat="c in customShows | filter:customFilter track by c.key">
+                                            ng-repeat="p in lists | filter:listFilter track by ((p.mediaSource || 'plex') + '-' + p.type + '-' + p.serverName + '-' + p.key + '-' + (p.libraryTitle || ''))">
                                             <input type="checkbox"
-                                                ng-model="c.selected"
+                                                ng-model="p.selected"
                                                 ng-disabled="importing"
                                                 style="margin-right: 0.5rem;" />
-                                            <span class="badge badge-info text-uppercase" style="font-size: 0.65rem;">custom</span>
-                                            {{ c.title }}<span ng-if="c.count !== null && c.count !== undefined"> ({{ c.count }})</span>
+                                            <span class="badge badge-secondary text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.mediaSource && p.type !== 'custom' && p.type !== 'external-list'">{{ p.mediaSource }}</span>
+                                            <span class="badge badge-info text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.type === 'custom'">custom</span>
+                                            <span class="badge badge-warning text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.type === 'external-list' || p.trackedListId">list</span>
+                                            <span class="badge badge-light border text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.type && p.type !== 'custom' && p.type !== 'external-list'">{{ p.type }}</span>
+                                            {{ p.title }}<span ng-if="p.count !== null && p.count !== undefined"> ({{ p.count }})</span>
+                                            <span class="text-muted small" ng-if="p.libraryTitle"> — {{ p.libraryTitle }}</span>
+                                            <span class="text-muted small" ng-if="p.serverName"> ({{ p.serverName }})</span>
                                         </label>
                                     </div>
                                 </div>
                                 <div class="card-footer small text-muted">
-                                    {{ selectedCount(customShows) }} selected · {{ customShows.length }} total
+                                    {{ selectedCount(lists) }} selected · {{ lists.length }} total
                                 </div>
                             </div>
                         </div>
@@ -203,7 +260,7 @@
                     <button type="button" class="btn btn-sm btn-secondary" ng-click="cancel()" ng-disabled="importing">Cancel</button>
                     <button type="button" class="btn btn-sm btn-primary"
                         ng-click="importSelected()"
-                        ng-disabled="loading || importing || (selectedCount(lists) + selectedCount(shows) + selectedCount(customShows)) === 0">
+                        ng-disabled="loading || importing || (selectedMovieCount() + selectedCount(lists) + selectedCount(shows)) === 0">
                         <span class="fa fa-spinner fa-spin" ng-show="importing"></span>
                         Import selected
                     </button>

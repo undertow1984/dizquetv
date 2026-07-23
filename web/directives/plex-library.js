@@ -11,7 +11,11 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             limit: "=limit",
             /** When true, render inline (no modal chrome) — used by Create Custom Show */
             embedded: "=?",
-            /** When true, hide Custom filter and custom-programming panel */
+            /**
+             * Legacy: previously hid the Custom filter / separate custom panel.
+             * Custom shows now always fold into Playlists & Collections (except filler).
+             * Still accepted so older templates (hide-custom="true") keep working.
+             */
             hideCustom: "=?",
             /**
              * When true, only show libraries marked "Contains filler" in Library Management.
@@ -56,9 +60,9 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             scope.movieLibraries = [];
             scope.showLibraries = [];
             scope.contentPanels = [
-                { title: "Movies", libraries: [], filter: "", allowCollections: false, emptyText: "No movie libraries found." },
-                { title: "TV Shows", libraries: [], filter: "", allowCollections: false, emptyText: "No TV show libraries found." },
-                { title: "Playlists & Collections", libraries: [], filter: "", allowCollections: true, emptyText: "No playlists or collections found." },
+                { title: "Movies", libraries: [], visibleLibraries: [], filter: "", summaryFilter: "", allowCollections: false, allowAddAll: true, emptyText: "No movie libraries found." },
+                { title: "TV Shows", libraries: [], visibleLibraries: [], filter: "", summaryFilter: "", allowCollections: false, allowAddAll: true, emptyText: "No TV show libraries found." },
+                { title: "Playlists/Lists/Custom/Collections", libraries: [], visibleLibraries: [], filter: "", summaryFilter: "", allowCollections: true, allowAddAll: true, emptyText: "No playlists, lists, custom shows, or collections found." },
             ];
 
             /** Case-insensitive match against common display fields. */
@@ -66,7 +70,16 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 if (!item || !q) {
                     return true;
                 }
-                let fields = [item.title, item.name, item.showTitle, item.year, item.type];
+                let fields = [
+                    item.title,
+                    item.name,
+                    item.showTitle,
+                    item.libraryTitle,
+                    item.serverName,
+                    item.year,
+                    typeLabel(item),
+                    item.type,
+                ];
                 for (let i = 0; i < fields.length; i++) {
                     if (fields[i] != null && String(fields[i]).toLowerCase().indexOf(q) !== -1) {
                         return true;
@@ -81,31 +94,350 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 return false;
             }
 
+            function typeLabel(item) {
+                if (!item) return '';
+                if (item.type === 'custom' || item.customShow === true) return 'custom';
+                return item.type || '';
+            }
+
+            /** Case-insensitive match against program plot/summary fields. */
+            function summaryMatchesFilter(item, q) {
+                if (!q) {
+                    return true;
+                }
+                if (!item) {
+                    return false;
+                }
+                let fields = [item.summary, item.Overview, item.overview, item.plot, item.Plot];
+                for (let i = 0; i < fields.length; i++) {
+                    if (fields[i] != null && String(fields[i]).toLowerCase().indexOf(q) !== -1) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
             /**
-             * Show an item if it matches the filter.
-             * @param {*} item
-             * @param {string} [filterText] optional panel-specific filter
-             * @param {boolean} [topLevelOnly] if true, only match this item's title (no nested search)
+             * TV title-only search stays top-level (show names). When a summary
+             * filter is set, search nested seasons/episodes too.
              */
-            scope.itemMatchesFilter = function (item, filterText, topLevelOnly, allowCollections) {
+            function panelUsesTopLevelOnly(panel) {
+                if (!panel || panel.topLevelSearchOnly !== true) {
+                    return false;
+                }
+                // Summary search must look inside shows for episode plots
+                if (String(panel.summaryFilter || "").trim()) {
+                    return false;
+                }
+                return true;
+            }
+            // Expose for template ng-if filters
+            scope.panelTopOnly = panelUsesTopLevelOnly;
+
+            function itemIdentityKey(item) {
+                if (!item) return '';
+                let source = item.source || item.serverType || '';
+                let server =
+                    item.serverName
+                    || item.serverKey
+                    || (item._server && item._server.name)
+                    || '';
+                let rk =
+                    item.ratingKey != null
+                        ? String(item.ratingKey)
+                        : item.jellyfinId != null
+                          ? String(item.jellyfinId)
+                          : '';
+                return source + '|' + server + '|' + rk;
+            }
+
+            function libraryIdentityKey(item) {
+                if (!item) return '';
+                let source = item.source || item.serverType || '';
+                let server =
+                    item.serverName
+                    || item.serverKey
+                    || (item._server && item._server.name)
+                    || '';
+                let sk =
+                    item.sectionKey != null
+                        ? String(item.sectionKey)
+                        : item.librarySectionKey != null
+                          ? String(item.librarySectionKey)
+                          : item.key != null
+                            ? String(item.key)
+                            : '';
+                return source + '|' + server + '|' + sk;
+            }
+
+            function clearPanelServerSearch(panel) {
+                if (!panel) return;
+                panel._searchActive = false;
+                panel._searchHitMovieKeys = null;
+                panel._searchHitShowKeys = null;
+                panel._searchHitEpisodeKeys = null;
+                panel._searchHitSeasonKeys = null;
+                panel._searchHitLibraryKeys = null;
+            }
+
+            function applyServerSearchHits(panel, result) {
+                let movieKeys = {};
+                let showKeys = {};
+                let episodeKeys = {};
+                let seasonKeys = {};
+                let libraryKeys = {};
+                let movies = (result && result.movies) || [];
+                let shows = (result && result.shows) || [];
+                let episodes = (result && result.episodes) || [];
+                for (let i = 0; i < movies.length; i++) {
+                    let m = movies[i];
+                    let k =
+                        (m.source || '') +
+                        '|' +
+                        (m.serverName || '') +
+                        '|' +
+                        String(m.ratingKey || m.jellyfinId || '');
+                    movieKeys[k] = true;
+                    if (m.librarySectionKey != null) {
+                        libraryKeys[
+                            (m.source || '') +
+                                '|' +
+                                (m.serverName || '') +
+                                '|' +
+                                String(m.librarySectionKey)
+                        ] = true;
+                    }
+                }
+                for (let i = 0; i < shows.length; i++) {
+                    let s = shows[i];
+                    let k =
+                        (s.source || '') +
+                        '|' +
+                        (s.serverName || '') +
+                        '|' +
+                        String(s.ratingKey || s.jellyfinId || '');
+                    showKeys[k] = true;
+                }
+                for (let i = 0; i < episodes.length; i++) {
+                    let e = episodes[i];
+                    let k =
+                        (e.source || '') +
+                        '|' +
+                        (e.serverName || '') +
+                        '|' +
+                        String(e.ratingKey || e.jellyfinId || '');
+                    episodeKeys[k] = true;
+                    if (e.parentRatingKey != null) {
+                        seasonKeys[
+                            (e.source || '') +
+                                '|' +
+                                (e.serverName || '') +
+                                '|' +
+                                String(e.parentRatingKey)
+                        ] = true;
+                    }
+                    if (e.grandparentRatingKey != null) {
+                        showKeys[
+                            (e.source || '') +
+                                '|' +
+                                (e.serverName || '') +
+                                '|' +
+                                String(e.grandparentRatingKey)
+                        ] = true;
+                    }
+                    if (e.librarySectionKey != null) {
+                        libraryKeys[
+                            (e.source || '') +
+                                '|' +
+                                (e.serverName || '') +
+                                '|' +
+                                String(e.librarySectionKey)
+                        ] = true;
+                    }
+                }
+                panel._searchActive = true;
+                panel._searchHitMovieKeys = movieKeys;
+                panel._searchHitShowKeys = showKeys;
+                panel._searchHitEpisodeKeys = episodeKeys;
+                panel._searchHitSeasonKeys = seasonKeys;
+                panel._searchHitLibraryKeys = libraryKeys;
+            }
+
+            /**
+             * Visibility for a panel row when server search hits are active,
+             * else fall back to local title/summary matching.
+             */
+            scope.panelItemVisible = function (item, panel) {
+                if (!panel) {
+                    return true;
+                }
+                if (panel._searchActive) {
+                    if (item && item.isLibraryNode) {
+                        return !!(
+                            panel._searchHitLibraryKeys
+                            && panel._searchHitLibraryKeys[libraryIdentityKey(item)]
+                        );
+                    }
+                    let k = itemIdentityKey(item);
+                    if (item && item.type === 'show') {
+                        return !!(panel._searchHitShowKeys && panel._searchHitShowKeys[k]);
+                    }
+                    if (item && item.type === 'movie') {
+                        return !!(panel._searchHitMovieKeys && panel._searchHitMovieKeys[k]);
+                    }
+                    if (
+                        item
+                        && (
+                            item.type === 'playlist'
+                            || item.type === 'collection'
+                            || item.type === 'custom'
+                            || item.customShow === true
+                            || item.type === 'external-list'
+                            || item.trackedList === true
+                            || item.trackedListId
+                        )
+                    ) {
+                        // Playlists / collections / custom / tracked lists: local title filter
+                        return scope.itemMatchesFilter(
+                            item,
+                            panel.filter,
+                            true,
+                            panel.allowCollections === true,
+                            panel.summaryFilter
+                        );
+                    }
+                    if (item && item.type === 'artist') {
+                        return !!(panel._searchHitShowKeys && panel._searchHitShowKeys[k]);
+                    }
+                    return !!(
+                        (panel._searchHitShowKeys && panel._searchHitShowKeys[k])
+                        || (panel._searchHitMovieKeys && panel._searchHitMovieKeys[k])
+                    );
+                }
+                return scope.itemMatchesFilter(
+                    item,
+                    panel.filter,
+                    panelUsesTopLevelOnly(panel),
+                    panel.allowCollections === true,
+                    panel.summaryFilter
+                );
+            };
+
+            function panelFilterState(panel) {
+                let titleF = panel && panel.filter != null ? String(panel.filter) : "";
+                let sumF =
+                    panel && panel.summaryFilter != null
+                        ? String(panel.summaryFilter)
+                        : "";
+                return {
+                    titleF: titleF,
+                    sumF: sumF,
+                    allowCollections: !!(panel && panel.allowCollections),
+                    hasFilter: !!(titleF.trim() || sumF.trim()),
+                };
+            }
+
+            /** True if item should be added under the active panel filters (or no filter). */
+            function passesPanelFilter(item, panel, asLeaf) {
+                let f = panelFilterState(panel);
+                if (!f.hasFilter) {
+                    return true;
+                }
+                // Prefer server search hit sets when active (same as UI visibility)
+                if (panel && panel._searchActive) {
+                    let k = itemIdentityKey(item);
+                    if (item && item.type === 'movie') {
+                        return !!(panel._searchHitMovieKeys && panel._searchHitMovieKeys[k]);
+                    }
+                    if (item && item.type === 'episode') {
+                        return !!(panel._searchHitEpisodeKeys && panel._searchHitEpisodeKeys[k]);
+                    }
+                    if (item && item.type === 'season') {
+                        return !!(panel._searchHitSeasonKeys && panel._searchHitSeasonKeys[k]);
+                    }
+                    if (item && (item.type === 'show' || item.type === 'artist')) {
+                        return !!(panel._searchHitShowKeys && panel._searchHitShowKeys[k]);
+                    }
+                    if (item && item.isLibraryNode) {
+                        return !!(
+                            panel._searchHitLibraryKeys
+                            && panel._searchHitLibraryKeys[libraryIdentityKey(item)]
+                        );
+                    }
+                }
+                return scope.itemMatchesFilter(
+                    item,
+                    f.titleF,
+                    asLeaf === true,
+                    f.allowCollections,
+                    f.sumF
+                );
+            }
+
+            /**
+             * When adding a container (+ on show/library/season):
+             * - No filter → add everything under it
+             * - TV title-only filter → show already matched by name; add whole show
+             * - Summary / movie filters → only add nested rows that match the filter
+             */
+            function shouldFilterChildrenOnAdd(panel) {
+                let f = panelFilterState(panel);
+                if (!f.hasFilter) {
+                    return false;
+                }
+                if (panelUsesTopLevelOnly(panel)) {
+                    return false;
+                }
+                return true;
+            }
+
+            /**
+             * Show an item if it matches the title filter and (optional) summary filter.
+             * Both filters are AND when set. Nested items may satisfy a filter for parents
+             * when topLevelOnly is false (Movies panel, or TV with summary filter).
+             * @param {*} item
+             * @param {string} [filterText] optional panel title filter
+             * @param {boolean} [topLevelOnly] if true, only match this item (no nested search)
+             * @param {boolean} [allowCollections]
+             * @param {string} [summaryFilterText] optional panel summary filter
+             */
+            scope.itemMatchesFilter = function (item, filterText, topLevelOnly, allowCollections, summaryFilterText) {
                 // Hide collections in Movies/TV browsers; allow them in Playlists & Collections panel
                 if (item && item.type === 'collection' && !allowCollections) {
                     return false;
                 }
-                let raw = (typeof filterText === 'string' ? filterText : scope.contentFilter) || "";
-                raw = raw.trim();
-                if (!raw) {
+                let titleRaw = (typeof filterText === 'string' ? filterText : scope.contentFilter) || "";
+                titleRaw = titleRaw.trim();
+                let summaryRaw =
+                    typeof summaryFilterText === 'string'
+                        ? summaryFilterText
+                        : "";
+                summaryRaw = String(summaryRaw || "").trim();
+                if (!titleRaw && !summaryRaw) {
                     return true;
                 }
-                let q = raw.toLowerCase();
-                if (textMatchesFilter(item, q)) {
+
+                let selfTitleOk = true;
+                if (titleRaw) {
+                    let q = titleRaw.toLowerCase();
+                    selfTitleOk = textMatchesFilter(item, q);
+                    if (
+                        !selfTitleOk
+                        && item
+                        && item.type
+                        && String(item.type).toLowerCase().indexOf(q) !== -1
+                    ) {
+                        selfTitleOk = true;
+                    }
+                }
+                let selfSummaryOk = true;
+                if (summaryRaw) {
+                    selfSummaryOk = summaryMatchesFilter(item, summaryRaw.toLowerCase());
+                }
+                if (selfTitleOk && selfSummaryOk) {
                     return true;
                 }
-                // Also match type badge text (playlist / collection)
-                if (item && item.type && String(item.type).toLowerCase().indexOf(q) !== -1) {
-                    return true;
-                }
-                // TV / lists panel: only search top-level titles
+                // Title-only TV list: do not walk seasons/episodes
                 if (topLevelOnly) {
                     return false;
                 }
@@ -114,7 +446,15 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                         if (item.nested[i].type === 'collection' && !allowCollections) {
                             continue;
                         }
-                        if (scope.itemMatchesFilter(item.nested[i], filterText, false, allowCollections)) {
+                        if (
+                            scope.itemMatchesFilter(
+                                item.nested[i],
+                                filterText,
+                                false,
+                                allowCollections,
+                                summaryFilterText
+                            )
+                        ) {
                             return true;
                         }
                     }
@@ -122,26 +462,62 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 return false;
             };
 
-            /** Nested rows under a filtered top-level item (TV: always show children once expanded). */
+            /** Nested rows under a filtered top-level item. */
             scope.nestedMatchesFilter = function (item, panel) {
                 let allowCollections = panel && panel.allowCollections === true;
                 if (item && item.type === 'collection' && !allowCollections) {
                     return false;
                 }
-                if (panel && panel.topLevelSearchOnly) {
+                // Server search hits: only show matching movies/episodes/seasons
+                if (panel && panel._searchActive) {
+                    let k = itemIdentityKey(item);
+                    if (item && item.type === 'movie') {
+                        return !!(panel._searchHitMovieKeys && panel._searchHitMovieKeys[k]);
+                    }
+                    if (item && item.type === 'episode') {
+                        return !!(panel._searchHitEpisodeKeys && panel._searchHitEpisodeKeys[k]);
+                    }
+                    if (item && item.type === 'season') {
+                        return !!(panel._searchHitSeasonKeys && panel._searchHitSeasonKeys[k]);
+                    }
+                    if (item && item.type === 'show') {
+                        return !!(panel._searchHitShowKeys && panel._searchHitShowKeys[k]);
+                    }
+                    // intermediate nodes: show if any filter text still matches locally
+                    return scope.itemMatchesFilter(
+                        item,
+                        panel.filter,
+                        false,
+                        allowCollections,
+                        panel.summaryFilter
+                    );
+                }
+                // Title-only TV: once a show is expanded, list all its children
+                if (panelUsesTopLevelOnly(panel)) {
                     return true;
                 }
-                return scope.itemMatchesFilter(item, panel ? panel.filter : "", false, allowCollections);
+                // Summary (or Movies) filter: only show nested rows that match
+                return scope.itemMatchesFilter(
+                    item,
+                    panel ? panel.filter : "",
+                    false,
+                    allowCollections,
+                    panel ? panel.summaryFilter : ""
+                );
             };
 
             scope.hasVisiblePanelItems = function (panel) {
-                if (!panel || !panel.libraries) {
+                if (!panel) {
                     return false;
                 }
-                let topOnly = panel.topLevelSearchOnly === true;
-                let allowCollections = panel.allowCollections === true;
+                if (panel.visibleLibraries) {
+                    return panel.visibleLibraries.length > 0;
+                }
+                if (!panel.libraries) {
+                    return false;
+                }
                 for (let i = 0; i < panel.libraries.length; i++) {
-                    if (scope.itemMatchesFilter(panel.libraries[i], panel.filter, topOnly, allowCollections)) {
+                    if (scope.panelItemVisible(panel.libraries[i], panel)) {
                         return true;
                     }
                 }
@@ -163,7 +539,10 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     $timeout(resolve,t);
                 });
             }
-            scope.sourceFilter = 'all'; // all | plex | jellyfin | custom
+            scope.sourceFilter = 'all'; // all | plex | jellyfin
+            scope._customShowsLoaded = false;
+            scope._trackedListsLoaded = false;
+            scope.trackedLists = [];
             // Match channel content-sources: section spinner until session cache is ready + bound
             scope.libraryCatalogReady = libraryCatalogPreload.isReady();
             scope.libraryCatalogLoading = libraryCatalogPreload.isLoading() || !scope.libraryCatalogReady;
@@ -211,7 +590,9 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                             title: "Fillers",
                             id: "fillers",
                             libraries: [],
+                            visibleLibraries: [],
                             filter: "",
+                            summaryFilter: "",
                             searching: false,
                             topLevelSearchOnly: true,
                             allowCollections: false,
@@ -219,14 +600,17 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                             emptyText: "Loading fillers...",
                         },
                         {
-                            title: "Playlists & Collections",
+                            title: "Playlists/Lists/Custom/Collections",
                             id: "lists",
                             libraries: [],
+                            visibleLibraries: [],
                             filter: "",
+                            summaryFilter: "",
                             searching: false,
                             topLevelSearchOnly: true,
                             allowCollections: true,
-                            emptyText: "Loading playlists & collections...",
+                            allowAddAll: true,
+                            emptyText: "Loading playlists, lists, custom, collections...",
                         },
                     ];
                 }
@@ -234,29 +618,38 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     {
                         title: "Movies",
                         libraries: [],
+                        visibleLibraries: [],
                         filter: "",
+                        summaryFilter: "",
                         searching: false,
                         topLevelSearchOnly: false,
                         allowCollections: false,
+                        allowAddAll: true,
                         emptyText: "Loading libraries...",
                     },
                     {
                         title: "TV Shows",
                         libraries: [],
+                        visibleLibraries: [],
                         filter: "",
+                        summaryFilter: "",
                         searching: false,
                         topLevelSearchOnly: true,
                         allowCollections: false,
+                        allowAddAll: true,
                         emptyText: "Loading libraries...",
                     },
                     {
-                        title: "Playlists & Collections",
+                        title: "Playlists/Lists/Custom/Collections",
                         libraries: [],
+                        visibleLibraries: [],
                         filter: "",
+                        summaryFilter: "",
                         searching: false,
                         topLevelSearchOnly: true,
                         allowCollections: true,
-                        emptyText: "Loading playlists & collections...",
+                        allowAddAll: true,
+                        emptyText: "Loading playlists, lists, custom, collections...",
                     },
                 ];
             }
@@ -280,6 +673,72 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     console.error(err);
                     scope.customShows = [];
                 }
+            }
+
+            /** Tracked lists (Library → Lists) — always live. */
+            async function loadTrackedListsLive() {
+                try {
+                    let list = await libraryCatalogPreload.fetchTrackedListsLive();
+                    scope.trackedLists = list || [];
+                } catch (err) {
+                    console.error(err);
+                    scope.trackedLists = [];
+                }
+            }
+
+            /** Map custom shows into Playlists/Lists/Custom/Collections row shape. */
+            function customShowsAsListItems() {
+                let out = [];
+                let list = scope.customShows || [];
+                for (let i = 0; i < list.length; i++) {
+                    let s = list[i];
+                    if (!s) continue;
+                    out.push({
+                        type: 'custom',
+                        customShow: true,
+                        id: s.id,
+                        title: s.name || s.title || 'Custom show',
+                        name: s.name || s.title || 'Custom show',
+                        count:
+                            s.count != null
+                                ? s.count
+                                : Array.isArray(s.content)
+                                  ? s.content.length
+                                  : null,
+                        source: 'custom',
+                        mediaSource: 'custom',
+                        serverType: 'custom',
+                        isLibraryNode: false,
+                    });
+                }
+                return out;
+            }
+
+            /** Map tracked lists into Playlists/Lists/Custom/Collections row shape. */
+            function trackedListsAsListItems() {
+                let out = [];
+                let list = scope.trackedLists || [];
+                for (let i = 0; i < list.length; i++) {
+                    let s = list[i];
+                    if (!s) continue;
+                    out.push({
+                        type: 'external-list',
+                        trackedList: true,
+                        trackedListId: s.id || s.trackedListId || s.key,
+                        id: s.id || s.trackedListId || s.key,
+                        key: s.id || s.trackedListId || s.key,
+                        title: s.title || s.name || 'List',
+                        name: s.title || s.name || 'List',
+                        count: s.count != null ? s.count : null,
+                        provider: s.provider || null,
+                        source: 'list',
+                        mediaSource: 'list',
+                        serverType: 'list',
+                        serverName: '',
+                        isLibraryNode: false,
+                    });
+                }
+                return out;
             }
 
             function fillerKey(serverName, sectionKey) {
@@ -624,17 +1083,19 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             let sourceFilterOpId = 0;
 
             /**
-             * Switch All / Plex / Jellyfin / Custom.
+             * Switch All / Plex / Jellyfin.
              * Session cache only after ensureLoaded — never re-walks Plex/Jellyfin live.
              * Warm filter changes are in-memory hide/show (same idea as content-source filters).
+             * Custom shows always live under Playlists & Collections (not a top filter).
              * options.quiet: no section spinner (re-enter / pure filter swap when cache warm).
              */
             scope.setSourceFilter = async function (filter, options) {
                 options = options || {};
-                if (filter !== 'all' && filter !== 'plex' && filter !== 'jellyfin' && filter !== 'custom') {
-                    return;
+                // Custom is no longer a top-level source filter — redirect legacy callers
+                if (filter === 'custom') {
+                    filter = 'all';
                 }
-                if (scope.hideCustom && filter === 'custom') {
+                if (filter !== 'all' && filter !== 'plex' && filter !== 'jellyfin') {
                     return;
                 }
                 if (filter === 'plex' && !scope.hasPlex && libraryCatalogPreload.isReady()) return;
@@ -648,18 +1109,23 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
 
                 let opId = ++sourceFilterOpId;
                 let cacheWarm = libraryCatalogPreload.isReady();
-                // Live fetch only for custom shows (never session-cached)
-                let needsLiveCustom = filter === 'custom' || (filter === 'all' && !scope.hideCustom);
+                // Live fetch for custom shows + tracked lists (never session-cached).
+                // Reuse after first load so pure All/Plex/Jellyfin flips stay quiet.
+                let needsLiveCustom =
+                    !scope.fillerOnly && !scope._customShowsLoaded;
+                let needsLiveTracked =
+                    !scope.fillerOnly && !scope._trackedListsLoaded;
+                let needsLiveExtras = needsLiveCustom || needsLiveTracked;
                 // Quiet when cache warm and no live work — matches content-source filter UX
-                let quiet = !!options.quiet && cacheWarm && !needsLiveCustom;
-                if (!quiet && cacheWarm && scope._catalogBoundOnce && !needsLiveCustom && !options.force) {
+                let quiet = !!options.quiet && cacheWarm && !needsLiveExtras;
+                if (!quiet && cacheWarm && scope._catalogBoundOnce && !needsLiveExtras && !options.force) {
                     quiet = true; // pure All/Plex/Jellyfin filter flip
                 }
 
                 scope.sourceFilter = filter;
                 scope.contentFilter = "";
                 scope.errors = [];
-                scope.mediaSource = filter === 'custom' ? 'dizquetv' : filter;
+                scope.mediaSource = filter;
 
                 if (!quiet) {
                     scope.catalogLoading = true;
@@ -695,25 +1161,22 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     scope.plexServer = scope.plexServers[0];
                     scope.jellyfinServer = scope.jellyfinServers[0];
 
-                    if (filter === 'custom') {
-                        // Filler browser never uses custom programming
-                        if (scope.fillerOnly) {
-                            applyLibraryPanels([], [], [], []);
-                        } else {
-                            await loadCustomShowsLive();
-                        }
-                    } else {
-                        // Pure in-memory swap for Plex/Jellyfin (session cache)
-                        // (filler mode also flattens movie libraries — async)
-                        let ok = await applyPreloadedMedia(filter);
-                        if (!ok) {
-                            applyLibraryPanels([], [], [], [
-                                'No cached ' + filter + ' library data. Sync libraries under Library → Management.',
-                            ]);
-                        }
-                        if (filter === 'all' && !scope.hideCustom && !scope.fillerOnly) {
-                            await loadCustomShowsLive();
-                        }
+                    // Custom shows + tracked lists fold into Playlists/Lists/Custom/Collections
+                    if (needsLiveCustom) {
+                        await loadCustomShowsLive();
+                        scope._customShowsLoaded = true;
+                    }
+                    if (needsLiveTracked) {
+                        await loadTrackedListsLive();
+                        scope._trackedListsLoaded = true;
+                    }
+                    // Pure in-memory swap for Plex/Jellyfin (session cache)
+                    // (filler mode also flattens movie libraries — async)
+                    let ok = await applyPreloadedMedia(filter);
+                    if (!ok) {
+                        applyLibraryPanels([], [], [], [
+                            'No cached ' + filter + ' library data. Sync libraries under Library → Management.',
+                        ]);
                     }
                     if (opId !== sourceFilterOpId) {
                         return;
@@ -745,6 +1208,8 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
 
             scope.refreshSource = async function () {
                 scope._sourceFilterApplied = false;
+                scope._customShowsLoaded = false;
+                scope._trackedListsLoaded = false;
                 try {
                     // Manual refresh only — normal open uses session cache
                     scope.catalogLoading = true;
@@ -836,23 +1301,33 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 commitEmbeddedBatch(batch);
             }
 
-            scope.selectLibrary = async (library) => {
+            scope.selectLibrary = async (library, panel) => {
               await scope.fillNestedIfNecessary(library, true);
-              let p = library.nested.length;
-              scope.pending += library.nested.length;
+              let children = library.nested || [];
+              let filterKids = shouldFilterChildrenOnAdd(panel);
+              let p = children.length;
+              scope.pending += children.length;
               try {
-                for (let i = 0; i < library.nested.length; i++) {
-                    let child = library.nested[i];
+                for (let i = 0; i < children.length; i++) {
+                    let child = children[i];
                     if (child.type === 'collection' || child.type === 'genre') {
+                        scope.pending -= 1;
+                        p -= 1;
+                        continue;
+                    }
+                    // Respect title/summary filters: only add visible/matching items
+                    if (filterKids && !passesPanelFilter(child, panel, false)) {
                         scope.pending -= 1;
                         p -= 1;
                         continue;
                     }
                     // Leaf playables (movies) must not go through season expansion
                     if (child.type === 'movie' || child.type === 'episode' || child.type === 'track') {
-                        await scope.selectItem(child, false);
+                        if (!filterKids || passesPanelFilter(child, panel, true)) {
+                            await scope.selectItem(child, false);
+                        }
                     } else {
-                        await scope.selectShow(child);
+                        await scope.selectShow(child, panel);
                     }
                     scope.pending -= 1;
                     p -= 1;
@@ -936,6 +1411,15 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 movies = sortByTitle(movies || []);
                 flatShows = sortByTitle(flatShows || []);
                 listItems = sortByTitle(listItems || []);
+                // Fold custom shows + tracked lists into Playlists/Lists/Custom/Collections
+                // (channel Add Programming, custom show editor — not filler browser)
+                if (!scope.fillerOnly) {
+                    listItems = sortByTitle(
+                        listItems
+                            .concat(customShowsAsListItems())
+                            .concat(trackedListsAsListItems())
+                    );
+                }
                 let apply = () => {
                     scope.movieLibraries = movies;
                     scope.showLibraries = flatShows;
@@ -950,6 +1434,7 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                                 id: "fillers",
                                 libraries: movies,
                                 filter: "",
+                                summaryFilter: "",
                                 searching: false,
                                 topLevelSearchOnly: true,
                                 allowCollections: false,
@@ -957,13 +1442,15 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                                 emptyText: "No fillers in filler libraries.",
                             },
                             {
-                                title: "Playlists & Collections",
+                                title: "Playlists/Lists/Custom/Collections",
                                 id: "lists",
                                 libraries: listItems,
                                 filter: "",
+                                summaryFilter: "",
                                 searching: false,
                                 topLevelSearchOnly: true,
                                 allowCollections: true,
+                                allowAddAll: true,
                                 emptyText: "No playlists or collections in filler libraries.",
                             },
                         ];
@@ -973,31 +1460,39 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                                 title: "Movies",
                                 libraries: movies,
                                 filter: "",
+                                summaryFilter: "",
                                 searching: false,
                                 topLevelSearchOnly: false,
                                 allowCollections: false,
+                                allowAddAll: true,
                                 emptyText: "No movie libraries found.",
                             },
                             {
                                 title: "TV Shows",
                                 libraries: flatShows,
                                 filter: "",
+                                summaryFilter: "",
                                 searching: false,
                                 topLevelSearchOnly: true,
                                 allowCollections: false,
+                                allowAddAll: true,
                                 emptyText: "No TV shows found.",
                             },
                             {
-                                title: "Playlists & Collections",
+                                title: "Playlists/Lists/Custom/Collections",
                                 libraries: listItems,
                                 filter: "",
+                                summaryFilter: "",
                                 searching: false,
                                 topLevelSearchOnly: true,
                                 allowCollections: true,
-                                emptyText: "No playlists or collections found.",
+                                allowAddAll: true,
+                                emptyText: "No playlists, lists, custom shows, or collections found.",
                             },
                         ];
                     }
+                    // Seed visible lists (full catalog until user types a search)
+                    rebuildAllPanelVisible();
                     // catalogLoading / contentReady are owned by setSourceFilter
                 };
                 if (scope.$root && scope.$root.$$phase) {
@@ -1186,79 +1681,256 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             };
 
             scope.fillNestedIfNecessary = async (x, isLibrary) => {
-                if (typeof(x.nested) === 'undefined') {
-                    let server = (x && x._server) || scope.jellyfinServer || scope.plexServer;
-                    let isJf = (x && x.source === 'jellyfin') || scope.sourceFilter === 'jellyfin';
-                    if (isJf) {
-                        x.nested = await jellyfin.getNested(server, x, false, scope.errors);
-                    } else {
-                        x.nested = await plex.getNested(server, x, false, scope.errors);
-                    }
-                    // When expanding a playlist/collection, keep its children as-is.
-                    // For movie/show library browsing, strip nested collection folders.
-                    let keepCollections = x && (x.type === 'playlist' || x.type === 'collection');
-                    if (!keepCollections) {
-                        x.nested = (x.nested || []).filter((n) => n && n.type !== 'collection');
-                    } else {
-                        x.nested = x.nested || [];
-                    }
-                    // Propagate server identity for multi-server "All" mode
-                    for (let i = 0; i < x.nested.length; i++) {
-                        if (x.nested[i] && server) {
-                            tagServer(x.nested[i], server, isJf ? 'jellyfin' : 'plex');
-                        }
-                    }
-                    x.nested = sortByTitle(x.nested);
+                if (typeof(x.nested) !== 'undefined') {
+                    return;
                 }
+                // Custom shows: expand to clip list (preserve order)
+                if (x && (x.type === 'custom' || x.customShow === true)) {
+                    try {
+                        let showId = x.id || x.key;
+                        let show = await dizquetv.getShow(showId);
+                        if (!show || !Array.isArray(show.content)) {
+                            x.nested = [];
+                            return;
+                        }
+                        let nested = [];
+                        for (let i = 0; i < show.content.length; i++) {
+                            let item = JSON.parse(angular.toJson(show.content[i]));
+                            item.customShowId = show.id || showId;
+                            item.customShowName = show.name || x.title || x.name;
+                            item.customOrder = i;
+                            if (typeof item.commercials === 'undefined') {
+                                item.commercials = [];
+                            }
+                            nested.push(item);
+                        }
+                        x.nested = nested;
+                        if (x.count == null) {
+                            x.count = nested.length;
+                        }
+                        if (show.name) {
+                            x.title = show.name;
+                            x.name = show.name;
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        x.nested = [];
+                        scope.errors = (scope.errors || []).concat([
+                            'Failed to load custom show: ' + (x.title || x.name || x.id || ''),
+                        ]);
+                    }
+                    return;
+                }
+                // Tracked lists (Library → Lists): expand to matched programs
+                if (
+                    x
+                    && (
+                        x.type === 'external-list'
+                        || x.trackedList === true
+                        || x.trackedListId
+                    )
+                ) {
+                    try {
+                        let listId = x.trackedListId || x.id || x.key;
+                        let payload = await dizquetv.getTrackedListPrograms(listId);
+                        let programs = (payload && payload.programs) || [];
+                        let nested = [];
+                        for (let i = 0; i < programs.length; i++) {
+                            let item = JSON.parse(angular.toJson(programs[i]));
+                            if (typeof item.commercials === 'undefined') {
+                                item.commercials = [];
+                            }
+                            item.trackedListId = listId;
+                            item.trackedListName = x.title || x.name;
+                            nested.push(item);
+                        }
+                        x.nested = nested;
+                        x.count = nested.length;
+                    } catch (err) {
+                        console.error(err);
+                        x.nested = [];
+                        scope.errors = (scope.errors || []).concat([
+                            'Failed to load list: ' + (x.title || x.name || x.id || ''),
+                        ]);
+                    }
+                    return;
+                }
+                let server = (x && x._server) || scope.jellyfinServer || scope.plexServer;
+                let isJf = (x && x.source === 'jellyfin') || scope.sourceFilter === 'jellyfin';
+                if (isJf) {
+                    x.nested = await jellyfin.getNested(server, x, false, scope.errors);
+                } else {
+                    x.nested = await plex.getNested(server, x, false, scope.errors);
+                }
+                // When expanding a playlist/collection, keep its children as-is.
+                // For movie/show library browsing, strip nested collection folders.
+                let keepCollections = x && (x.type === 'playlist' || x.type === 'collection');
+                if (!keepCollections) {
+                    x.nested = (x.nested || []).filter((n) => n && n.type !== 'collection');
+                } else {
+                    x.nested = x.nested || [];
+                }
+                // Propagate server identity for multi-server "All" mode
+                for (let i = 0; i < x.nested.length; i++) {
+                    if (x.nested[i] && server) {
+                        tagServer(x.nested[i], server, isJf ? 'jellyfin' : 'plex');
+                    }
+                }
+                x.nested = sortByTitle(x.nested);
             }
             /**
-             * Movies panel: load nested so search can match movies inside libraries.
-             * TV panel: top-level only — shows are already flat; do not deep-search seasons/episodes.
+             * Load seasons (and their episodes) under a TV show for summary search.
              */
+            async function deepLoadShowForSummary(show) {
+                if (!show) return;
+                await scope.fillNestedIfNecessary(show, false);
+                let nested = show.nested || [];
+                for (let i = 0; i < nested.length; i++) {
+                    let child = nested[i];
+                    if (!child) continue;
+                    // Seasons (and sometimes nested folders) hold episodes
+                    if (
+                        child.type === 'season'
+                        || child.type === 'show'
+                        || child.type === 'folder'
+                        || (child.type !== 'episode' && child.type !== 'movie' && child.type !== 'track')
+                    ) {
+                        await scope.fillNestedIfNecessary(child, false);
+                        // One more level if still not episodes (rare)
+                        let grand = child.nested || [];
+                        for (let g = 0; g < grand.length; g++) {
+                            if (
+                                grand[g]
+                                && grand[g].type === 'season'
+                                && typeof grand[g].nested === 'undefined'
+                            ) {
+                                await scope.fillNestedIfNecessary(grand[g], false);
+                            }
+                        }
+                    }
+                }
+            }
+
+            /**
+             * Rebuild the visible list for a panel from libraries + current filters.
+             * Stored on the panel so ng-repeat tracks a real array that changes with search
+             * (ng-if alone was not reliably re-filtering playlist/custom rows).
+             */
+            function rebuildPanelVisible(panel) {
+                if (!panel) {
+                    return;
+                }
+                let libs = panel.libraries || [];
+                let out = [];
+                for (let i = 0; i < libs.length; i++) {
+                    if (scope.panelItemVisible(libs[i], panel)) {
+                        out.push(libs[i]);
+                    }
+                }
+                panel.visibleLibraries = out;
+                panel.filterEpoch = (panel.filterEpoch || 0) + 1;
+            }
+
+            function rebuildAllPanelVisible() {
+                let panels = scope.contentPanels || [];
+                for (let i = 0; i < panels.length; i++) {
+                    rebuildPanelVisible(panels[i]);
+                }
+            }
+
+            /**
+             * Title-only TV / Lists filters stay in-browser (flat list of names).
+             * Summary / movie nested filters use one server in-memory cache search
+             * (no per-show nested HTTP fan-out).
+             */
+            let _filterSearchSeq = 0;
             scope.onPanelFilterChange = async function (panel) {
+                if (!panel) {
+                    return;
+                }
                 let q = (panel.filter || "").trim();
-                if (!q) {
+                let sq = (panel.summaryFilter || "").trim();
+                if (!q && !sq) {
+                    clearPanelServerSearch(panel);
+                    rebuildPanelVisible(panel);
                     $timeout();
                     return;
                 }
+                // TV / lists / fillers title-only: pure in-memory against loaded row names
+                // (playlists, collections, custom shows — no server index for these)
+                if (panel.topLevelSearchOnly && !sq) {
+                    clearPanelServerSearch(panel);
+                    rebuildPanelVisible(panel);
+                    $timeout();
+                    return;
+                }
+                // No Plex/Jellyfin: still filter whatever is already in the panel (e.g. custom)
                 if (!scope.hasPlex && !scope.hasJellyfin) {
-                    return;
-                }
-                // TV / lists: only filter top-level titles (already loaded flat)
-                if (panel.topLevelSearchOnly) {
+                    clearPanelServerSearch(panel);
+                    rebuildPanelVisible(panel);
                     $timeout();
                     return;
                 }
+
+                let seq = ++_filterSearchSeq;
                 panel.searching = true;
                 $timeout();
                 try {
+                    // One round-trip: search server process memory (synced library cache)
+                    let result = await dizquetv.searchLibraryCache({
+                        title: q,
+                        summary: sq,
+                        limit: 4000,
+                    });
+                    if (seq !== _filterSearchSeq) {
+                        return; // superseded by a newer keystroke
+                    }
+                    applyServerSearchHits(panel, result || {});
+
+                    // Expand hit libraries/shows so matching children are visible (lazy, hits only)
                     for (let i = 0; i < panel.libraries.length; i++) {
                         let lib = panel.libraries[i];
-                        let asLibrary = lib.isLibraryNode === true;
-                        await scope.fillNestedIfNecessary(lib, asLibrary);
-                        // Auto-expand movie libraries when contents match
-                        if (scope.itemMatchesFilter(lib, panel.filter, false)) {
-                            let selfMatch = textMatchesFilter(lib, q.toLowerCase());
-                            let childMatch = false;
-                            if (lib.nested && lib.nested.length) {
-                                for (let c = 0; c < lib.nested.length; c++) {
-                                    if (lib.nested[c].type === 'collection') {
-                                        continue;
-                                    }
-                                    if (scope.itemMatchesFilter(lib.nested[c], panel.filter, false)) {
-                                        childMatch = true;
+                        if (!scope.panelItemVisible(lib, panel)) {
+                            lib.collapse = false;
+                            continue;
+                        }
+                        if (lib.isLibraryNode) {
+                            await scope.fillNestedIfNecessary(lib, true);
+                            lib.collapse = true;
+                        } else if (lib.type === 'show' || lib.type === 'artist') {
+                            // Only expand when we have episode-level hits to show
+                            let hasEpHits =
+                                panel._searchHitEpisodeKeys
+                                && Object.keys(panel._searchHitEpisodeKeys).length > 0;
+                            if (hasEpHits || sq) {
+                                await scope.fillNestedIfNecessary(lib, false);
+                                let seasons = lib.nested || [];
+                                for (let s = 0; s < seasons.length; s++) {
+                                    let season = seasons[s];
+                                    if (!season || season.type !== 'season') continue;
+                                    let seasonKey = itemIdentityKey(season);
+                                    if (
+                                        panel._searchHitSeasonKeys
+                                        && panel._searchHitSeasonKeys[seasonKey]
+                                    ) {
+                                        await scope.fillNestedIfNecessary(season, false);
+                                        season.collapse = true;
                                     }
                                 }
-                            }
-                            if (childMatch || selfMatch) {
                                 lib.collapse = true;
                             }
                         }
                     }
+                    rebuildPanelVisible(panel);
                 } catch (err) {
-                    console.error("Filter load failed", err);
+                    console.error("Filter search failed", err);
+                    // Fall back to previous (slower) deep-load path for this panel only
+                    clearPanelServerSearch(panel);
+                    rebuildPanelVisible(panel);
                 } finally {
-                    panel.searching = false;
+                    if (seq === _filterSearchSeq) {
+                        panel.searching = false;
+                    }
                     $timeout();
                 }
             };
@@ -1266,13 +1938,29 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             /**
              * True when a top-level panel row can expand (library folder, show, playlist, etc.).
              * Flat movie clips (Add Filler "Fillers" list) are leaves — no tree chevron.
+             * Custom shows expand to their clip list like playlists/collections.
              */
             scope.isExpandableTopLevel = (item) => {
                 if (!item) return false;
                 if (item.isLibraryNode === true) return true;
+                if (item.type === 'custom' || item.customShow === true) return true;
+                if (
+                    item.type === 'external-list'
+                    || item.trackedList === true
+                    || item.trackedListId
+                ) {
+                    return true;
+                }
                 let t = item.type;
                 return t === 'show' || t === 'artist' || t === 'playlist'
                     || t === 'collection' || t === 'genre' || t === 'season' || t === 'album';
+            };
+
+            /** Leaf playables under an expanded row (playlist/custom/show tree). */
+            scope.isPlayableLibraryItem = (item) => {
+                if (!item) return false;
+                let t = item.type;
+                return t === 'movie' || t === 'episode' || t === 'track';
             };
 
             /** Expand a node; library folders use isLibraryNode, shows/playlists do not. */
@@ -1296,26 +1984,43 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 }, 0)
             }
 
-            scope.selectTopLevelItem = async (item) => {
+            scope.selectTopLevelItem = async (item, panel) => {
                 if (!item) {
                     return;
                 }
+                // Custom shows listed under Playlists/Lists/Custom/Collections
+                if (item.type === 'custom' || item.customShow === true) {
+                    return scope.addCustomShow(item);
+                }
+                // Tracked lists (Library → Lists)
+                if (
+                    item.type === 'external-list'
+                    || item.trackedList === true
+                    || item.trackedListId
+                ) {
+                    return scope.addTrackedList(item);
+                }
                 if (item.isLibraryNode) {
-                    return scope.selectLibrary(item);
+                    return scope.selectLibrary(item, panel);
                 }
                 if (item.type === 'playlist' || item.type === 'collection') {
-                    return scope.selectPlaylist(item);
+                    return scope.selectPlaylist(item, panel);
                 }
                 if (item.type === 'movie') {
+                    if (!passesPanelFilter(item, panel, true)) {
+                        return;
+                    }
                     return scope.selectItem(item, true);
                 }
                 // show, artist, etc.
-                return scope.selectShow(item);
+                return scope.selectShow(item, panel);
             };
 
             /**
-             * Add every currently visible (search-filtered) item in a panel.
-             * Used by filler "Add all" so only listed/filtered clips are selected.
+             * Add contents of every currently visible (filtered) row in a panel.
+             * Movies panel: expands library folders and only adds nested items that
+             * match the title/summary filters (not the entire unfiltered library).
+             * TV / playlists: adds each matching top-level show or list as usual.
              */
             scope.selectAllVisibleInPanel = async (panel) => {
                 if (!panel || !panel.libraries || !panel.libraries.length) {
@@ -1324,30 +2029,126 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                 if (panel.addingAll) {
                     return;
                 }
-                let topOnly = panel.topLevelSearchOnly !== false;
                 let allowCollections = panel.allowCollections === true;
-                let visible = [];
-                for (let i = 0; i < panel.libraries.length; i++) {
-                    let item = panel.libraries[i];
-                    if (scope.itemMatchesFilter(item, panel.filter, topOnly, allowCollections)) {
-                        visible.push(item);
+                let titleF = panel.filter;
+                let sumF = panel.summaryFilter;
+                // Prefer pre-built visible list (search-aware)
+                let visible = (panel.visibleLibraries || []).slice();
+                if (!visible.length) {
+                    for (let i = 0; i < panel.libraries.length; i++) {
+                        let item = panel.libraries[i];
+                        if (scope.panelItemVisible(item, panel)) {
+                            visible.push(item);
+                        }
                     }
                 }
                 if (!visible.length) {
                     return;
                 }
+
+                async function addFilteredItem(item) {
+                    if (!item) {
+                        return;
+                    }
+                    if (item.type === 'custom' || item.customShow === true) {
+                        await scope.addCustomShow(item);
+                        return;
+                    }
+                    if (
+                        item.type === 'external-list'
+                        || item.trackedList === true
+                        || item.trackedListId
+                    ) {
+                        await scope.addTrackedList(item);
+                        return;
+                    }
+                    // Leaf playables
+                    if (
+                        item.type === 'movie'
+                        || item.type === 'episode'
+                        || item.type === 'track'
+                    ) {
+                        if (
+                            scope.itemMatchesFilter(
+                                item,
+                                titleF,
+                                true,
+                                allowCollections,
+                                sumF
+                            )
+                        ) {
+                            await scope.selectItem(item, false);
+                        }
+                        return;
+                    }
+                    // Containers: always go through filter-aware select helpers
+                    if (item.type === 'playlist' || item.type === 'collection') {
+                        await scope.selectPlaylist(item, panel);
+                        return;
+                    }
+                    if (item.type === 'show' || item.type === 'artist' || item.type === 'season') {
+                        if (item.type === 'season') {
+                            await scope.selectSeason(item, panel);
+                        } else {
+                            await scope.selectShow(item, panel);
+                        }
+                        return;
+                    }
+                    if (item.isLibraryNode) {
+                        await scope.selectLibrary(item, panel);
+                        return;
+                    }
+                    // Movies (and other deep panels): walk nested, only add matches
+                    await scope.fillNestedIfNecessary(
+                        item,
+                        item.isLibraryNode === true
+                    );
+                    let nested = item.nested || [];
+                    for (let c = 0; c < nested.length; c++) {
+                        let child = nested[c];
+                        if (child.type === 'collection' && !allowCollections) {
+                            continue;
+                        }
+                        if (
+                            !scope.itemMatchesFilter(
+                                child,
+                                titleF,
+                                false,
+                                allowCollections,
+                                sumF
+                            )
+                        ) {
+                            continue;
+                        }
+                        if (
+                            child.type === 'movie'
+                            || child.type === 'episode'
+                            || child.type === 'track'
+                        ) {
+                            await scope.selectItem(child, false);
+                        } else if (
+                            child.type === 'show'
+                            || child.type === 'artist'
+                        ) {
+                            await scope.selectShow(child, panel);
+                        } else if (child.type === 'season') {
+                            await scope.selectSeason(child, panel);
+                        } else if (child.type === 'playlist' || child.type === 'collection') {
+                            await scope.selectPlaylist(child, panel);
+                        } else if (child.isLibraryNode || (child.nested && child.nested.length)) {
+                            await addFilteredItem(child);
+                        } else {
+                            await scope.selectTopLevelItem(child, panel);
+                        }
+                    }
+                }
+
                 panel.addingAll = true;
                 scope.pending += 1;
                 $timeout();
                 try {
                     for (let i = 0; i < visible.length; i++) {
-                        let item = visible[i];
-                        // Stage multi-add without per-item $apply spam
-                        if (item.type === 'movie' || item.type === 'episode' || item.type === 'track') {
-                            await scope.selectItem(item, false);
-                        } else {
-                            await scope.selectTopLevelItem(item);
-                        }
+                        await addFilteredItem(visible[i]);
                     }
                     // Modal mode: items sit in selection until Done.
                     // Embedded mode: flush staged batch once.
@@ -1362,29 +2163,53 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
             };
 
             scope.visiblePanelCount = function (panel) {
-                if (!panel || !panel.libraries) {
+                if (!panel) {
                     return 0;
                 }
-                let topOnly = panel.topLevelSearchOnly !== false;
-                let allowCollections = panel.allowCollections === true;
+                if (panel.visibleLibraries) {
+                    return panel.visibleLibraries.length;
+                }
+                if (!panel.libraries) {
+                    return 0;
+                }
                 let n = 0;
                 for (let i = 0; i < panel.libraries.length; i++) {
-                    if (scope.itemMatchesFilter(panel.libraries[i], panel.filter, topOnly, allowCollections)) {
+                    if (scope.panelItemVisible(panel.libraries[i], panel)) {
                         n++;
                     }
                 }
                 return n;
             };
+
+            scope.libraryTrackKey = function (item) {
+                if (!item) return 'x';
+                return (
+                    (item.mediaSource || item.source || item.serverType || 'plex')
+                    + '-'
+                    + (item.type || '')
+                    + '-'
+                    + (item.serverName || '')
+                    + '-'
+                    + (item.key || item.id || item.ratingKey || '')
+                    + '-'
+                    + (item.libraryTitle || '')
+                );
+            };
             
-            scope.selectSeason = (season) => {
+            scope.selectSeason = (season, panel) => {
                 return new Promise((resolve, reject) => {
                     $timeout(async () => {
                         await scope.fillNestedIfNecessary(season);
-                        let p = season.nested.length;
+                        let children = season.nested || [];
+                        let filterKids = shouldFilterChildrenOnAdd(panel);
+                        let p = children.length;
                         scope.pending += p;
                         try {
-                            for (let i = 0, l = season.nested.length; i < l; i++) {
-                                await scope.selectItem(season.nested[i], false)
+                            for (let i = 0, l = children.length; i < l; i++) {
+                                let child = children[i];
+                                if (!filterKids || passesPanelFilter(child, panel, true)) {
+                                    await scope.selectItem(child, false);
+                                }
                                 scope.pending -= 1;
                                 p -= 1;
                             }
@@ -1399,14 +2224,16 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     }, 0)
                 })
             }
-            scope.selectShow = (show) => {
+            scope.selectShow = (show, panel) => {
                 return new Promise((resolve, reject) => {
                     $timeout(async () => {
                         // Already a playable leaf
                         if (show && (show.type === 'movie' || show.type === 'episode' || show.type === 'track')) {
                             try {
-                                // single=true so embedded mode adds immediately
-                                await scope.selectItem(show, true);
+                                if (passesPanelFilter(show, panel, true)) {
+                                    // single=true so embedded mode adds immediately
+                                    await scope.selectItem(show, true);
+                                }
                                 resolve();
                             } catch (e) {
                                 reject(e);
@@ -1416,18 +2243,38 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                             return;
                         }
                         await scope.fillNestedIfNecessary(show);
-                        let p = show.nested.length;
+                        let filterKids = shouldFilterChildrenOnAdd(panel);
+                        // When filtering by summary, load season episodes so nested match works
+                        if (filterKids) {
+                            let nested0 = show.nested || [];
+                            for (let ni = 0; ni < nested0.length; ni++) {
+                                let n0 = nested0[ni];
+                                if (n0 && (n0.type === 'season' || n0.type === 'show')) {
+                                    await scope.fillNestedIfNecessary(n0, false);
+                                }
+                            }
+                        }
+                        let children = show.nested || [];
+                        let p = children.length;
                         scope.pending += p;
                         try {
-                            for (let i = 0, l = show.nested.length; i < l; i++) {
-                                let child = show.nested[i];
+                            for (let i = 0, l = children.length; i < l; i++) {
+                                let child = children[i];
+                                // Skip branches that don't match the active filter
+                                if (filterKids && !passesPanelFilter(child, panel, false)) {
+                                    scope.pending -= 1;
+                                    p -= 1;
+                                    continue;
+                                }
                                 if (child.type === 'movie' || child.type === 'episode' || child.type === 'track') {
-                                    await scope.selectItem(child, false);
+                                    if (!filterKids || passesPanelFilter(child, panel, true)) {
+                                        await scope.selectItem(child, false);
+                                    }
                                 } else if (child.type === 'season') {
-                                    await scope.selectSeason(child);
+                                    await scope.selectSeason(child, panel);
                                 } else {
                                     // Nested folders / specials
-                                    await scope.selectShow(child);
+                                    await scope.selectShow(child, panel);
                                 }
                                 scope.pending -= 1;
                                 p -= 1;
@@ -1443,23 +2290,32 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     }, 0)
                 })
             }
-            scope.selectPlaylist = async (playlist) => {
+            scope.selectPlaylist = async (playlist, panel) => {
                 return new Promise((resolve, reject) => {
                     $timeout(async () => {
                         try {
                             await scope.fillNestedIfNecessary(playlist);
-                            let p = (playlist.nested || []).length;
+                            let children = playlist.nested || [];
+                            let filterKids = shouldFilterChildrenOnAdd(panel);
+                            let p = children.length;
                             scope.pending += p;
                             try {
-                                for (let i = 0, l = (playlist.nested || []).length; i < l; i++) {
-                                    let child = playlist.nested[i];
+                                for (let i = 0, l = children.length; i < l; i++) {
+                                    let child = children[i];
+                                    if (filterKids && !passesPanelFilter(child, panel, false)) {
+                                        scope.pending -= 1;
+                                        p -= 1;
+                                        continue;
+                                    }
                                     if (child.type === 'movie' || child.type === 'episode' || child.type === 'track') {
-                                        await scope.selectItem(child, false);
+                                        if (!filterKids || passesPanelFilter(child, panel, true)) {
+                                            await scope.selectItem(child, false);
+                                        }
                                     } else if (child.type === 'season') {
-                                        await scope.selectSeason(child);
+                                        await scope.selectSeason(child, panel);
                                     } else {
                                         // Nested shows/folders inside playlists or collections
-                                        await scope.selectShow(child);
+                                        await scope.selectShow(child, panel);
                                     }
                                     scope.pending -= 1;
                                     p -= 1;
@@ -1504,6 +2360,45 @@ module.exports = function (plex, jellyfin, dizquetv, $timeout, commonProgramTool
                     scope.pending--;
                 }
             }
+
+            /** Add all matched programs from a tracked list (Library → Lists). */
+            scope.addTrackedList = async (listRow) => {
+                scope.pending++;
+                try {
+                    let listId = listRow.trackedListId || listRow.id || listRow.key;
+                    let payload = await dizquetv.getTrackedListPrograms(listId);
+                    let programs = (payload && payload.programs) || [];
+                    let batch = [];
+                    for (let i = 0; i < programs.length; i++) {
+                        let item = JSON.parse(angular.toJson(programs[i]));
+                        if (typeof item.commercials === 'undefined') {
+                            item.commercials = [];
+                        }
+                        item.trackedListId = listId;
+                        item.trackedListName = listRow.title || listRow.name;
+                        batch.push(item);
+                    }
+                    if (!batch.length) {
+                        scope.errors = (scope.errors || []).concat([
+                            'Tracked list has no matched programs: ' + (listRow.title || listId),
+                        ]);
+                        return;
+                    }
+                    if (scope.embedded) {
+                        commitEmbeddedBatch(batch);
+                    } else {
+                        scope.selection = scope.selection.concat(batch);
+                    }
+                    scope.$apply();
+                } catch (err) {
+                    console.error(err);
+                    scope.errors = (scope.errors || []).concat([
+                        'Failed to add list: ' + (listRow.title || listRow.name || ''),
+                    ]);
+                } finally {
+                    scope.pending--;
+                }
+            };
 
             scope.getProgramDisplayTitle = (x) => {
                 return commonProgramTools.getProgramDisplayTitle(x);

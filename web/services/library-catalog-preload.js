@@ -417,6 +417,39 @@ module.exports = function (plex, jellyfin, dizquetv) {
                 return [];
             }
         },
+        /**
+         * Always fetch tracked lists (Library → Lists) live — never session-cached.
+         * Returns summary rows suitable for folding into Playlists/Lists/Custom/Collections.
+         */
+        fetchTrackedListsLive: async () => {
+            try {
+                let list = await dizquetv.getTrackedLists();
+                return sortByTitle(
+                    (list || []).map((row) => ({
+                        title: row.name || row.listNameFromSource || 'List',
+                        name: row.name || row.listNameFromSource || 'List',
+                        id: row.id,
+                        key: row.id,
+                        type: 'external-list',
+                        trackedListId: row.id,
+                        provider: row.provider || null,
+                        count:
+                            row.matchedCount != null
+                                ? row.matchedCount
+                                : row.itemCount != null
+                                  ? row.itemCount
+                                  : null,
+                        mediaSource: 'list',
+                        source: 'list',
+                        serverType: 'list',
+                        serverName: '',
+                    }))
+                );
+            } catch (err) {
+                console.error(err);
+                return [];
+            }
+        },
         getContentSourceCatalog: () => state.contentSourceCatalog,
         getServers: () => ({
             plexServers: state.plexServers || [],

@@ -12,17 +12,22 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
             scope.servers = [];
 /** 'all' | 'plex' | 'jellyfin' */
             scope.mediaSourceFilter = 'all';
-            /** Merged playlists + collections */
+            /** Merged playlists + collections + custom shows */
             scope.lists = [];
             scope.shows = [];
-            scope.customShows = [];
+            /** Movie libraries (same idea as Create Custom Show Movies panel) */
+            scope.movies = [];
             /** Full unfiltered catalog (all servers) */
             scope._allLists = [];
             scope._allShows = [];
-            scope._allCustomShows = [];
+            scope._allMovies = [];
             scope.listFilter = "";
             scope.showFilter = "";
-            scope.customFilter = "";
+            scope.movieFilter = "";
+            scope.movieSummaryFilter = "";
+            scope.movieSearching = false;
+            /** When set, movie tree visibility uses server cache search hits */
+            scope._movieSearchHits = null; // { movieKeys: {}, libraryKeys: {} }
             scope.loading = false;
             scope.importing = false;
             scope.status = "";
@@ -93,11 +98,14 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                     && type !== "collection"
                     && type !== "show"
                     && type !== "custom"
+                    && type !== "movie"
+                    && type !== "external-list"
                 ) {
                     type = "playlist";
                 }
                 let mediaSource = source.mediaSource || source.serverType || source.source
                     || (type === 'custom' ? 'custom' : null)
+                    || (type === 'external-list' ? 'list' : null)
                     || (server && server.source) || 'plex';
                 return {
                     type: type,
@@ -116,6 +124,8 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                     jellyfinId: source.jellyfinId || source.ratingKey || null,
                     ratingKey: source.ratingKey || source.jellyfinId || null,
                     genreId: source.genreId || null,
+                    trackedListId: source.trackedListId || null,
+                    externalProvider: source.provider || source.externalProvider || null,
                     lastSyncedAt: new Date().toISOString(),
                 };
             }
@@ -226,13 +236,13 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
             async function open() {
                 scope.lists = [];
                 scope.shows = [];
-                scope.customShows = [];
+                scope.movies = [];
                 scope._allLists = [];
                 scope._allShows = [];
-                scope._allCustomShows = [];
+                scope._allMovies = [];
                 scope.listFilter = "";
                 scope.showFilter = "";
-                scope.customFilter = "";
+                scope.movieFilter = "";
                 scope.errors = [];
                 scope.status = "";
                 scope.progress = { current: 0, total: 0 };
@@ -269,13 +279,13 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
             }
 
             /**
-             * Load playlists+collections / shows / custom programming from local
-             * library cache only (same /api/content-sources/catalog as channel Properties).
+             * Load movies / TV shows / playlists+collections+custom from local
+             * library cache (content-sources catalog + media library folders).
              */
             scope.loadLists = async () => {
                 scope.listFilter = "";
                 scope.showFilter = "";
-                scope.customFilter = "";
+                scope.movieFilter = "";
                 scope.errors = [];
                 scope.loading = true;
                 $timeout();
@@ -290,6 +300,41 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                     let shows = (catalog.shows || []).map((s) => {
                         return Object.assign({}, s, { selected: false });
                     });
+                    // Movie libraries (tree roots — same as Create Custom Show → Movies)
+                    let media = libraryCatalogPreload.getMedia(
+                        scope.mediaSourceFilter === 'plex' || scope.mediaSourceFilter === 'jellyfin'
+                            ? scope.mediaSourceFilter
+                            : 'all'
+                    ) || { movies: [] };
+                    let movies = (media.movies || []).map((m) => {
+                        let mediaSource = m.source || m.serverType || m.mediaSource || 'plex';
+                        let serverName =
+                            m.serverName
+                            || (m._server && m._server.name)
+                            || '';
+                        let sectionKey = m.sectionKey || m.librarySectionKey || null;
+                        // Preserve _server for getNested
+                        let row = Object.assign({}, m, {
+                            title: m.title || m.name || 'Movies',
+                            type: m.type || 'movie',
+                            libraryType: m.type || 'movie',
+                            isLibraryNode: true,
+                            selected: false,
+                            collapse: false,
+                            nested: undefined,
+                            loadingNested: false,
+                            count: m.count != null ? m.count : null,
+                            serverName: serverName,
+                            mediaSource: mediaSource,
+                            source: mediaSource,
+                            serverType: mediaSource,
+                            sectionKey: sectionKey,
+                            librarySectionKey: sectionKey,
+                            libraryTitle: m.title || m.name || null,
+                        });
+                        return row;
+                    });
+                    // Fold custom shows + tracked lists into Playlists/Lists/Custom/Collections
                     let liveCustoms = await libraryCatalogPreload.fetchCustomShowsLive();
                     let customShows = (liveCustoms || []).map((c) => ({
                         title: c.name,
@@ -302,6 +347,10 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                         source: 'custom',
                         serverType: 'custom',
                     }));
+                    let trackedLists = await libraryCatalogPreload.fetchTrackedListsLive();
+                    lists = lists.concat(customShows).concat(
+                        (trackedLists || []).map((t) => Object.assign({}, t, { selected: false }))
+                    );
 
                     let warnings = catalog.warnings || [];
                     for (let w = 0; w < warnings.length && w < 4; w++) {
@@ -310,14 +359,14 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
 
                     scope._allLists = sortByTitle(lists);
                     scope._allShows = sortByTitle(shows);
-                    scope._allCustomShows = sortByTitle(customShows);
+                    scope._allMovies = sortByTitle(movies);
                     scope.applyMediaSourceFilter();
                 } catch (err) {
                     console.error(err);
                     scope.errors.push("Unable to load content sources from cache.");
                     scope._allLists = [];
                     scope._allShows = [];
-                    scope._allCustomShows = [];
+                    scope._allMovies = [];
                     scope.applyMediaSourceFilter();
                 } finally {
                     scope.loading = false;
@@ -328,7 +377,15 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
             scope.mediaSourceFilterFn = (item) => {
                 if (!item) return false;
                 let ms = item.mediaSource || item.serverType || item.source || 'plex';
-                if (ms === 'custom' || item.type === 'custom') return true;
+                if (
+                    ms === 'custom'
+                    || ms === 'list'
+                    || item.type === 'custom'
+                    || item.type === 'external-list'
+                    || item.trackedListId
+                ) {
+                    return true;
+                }
                 if (scope.mediaSourceFilter === 'all') return true;
                 return ms === scope.mediaSourceFilter;
             };
@@ -351,7 +408,10 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                 let f = scope.mediaSourceFilterFn;
                 scope.lists = (scope._allLists || []).filter(f);
                 scope.shows = (scope._allShows || []).filter(f);
-                scope.customShows = (scope._allCustomShows || []).slice();
+                scope.movies = (scope._allMovies || []).filter(f);
+                scope._movieSearchHits = null;
+                scope.movieFilter = "";
+                scope.movieSummaryFilter = "";
             };
 
             scope.selectAll = (list, value) => {
@@ -370,6 +430,381 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                 return n;
             };
 
+            // ---- Movies tree (Create Custom Show–style) ----
+
+            function movieIdentityKey(item) {
+                if (!item) return '';
+                let source = item.mediaSource || item.source || item.serverType || 'plex';
+                let server = item.serverName || (item._server && item._server.name) || '';
+                let rk =
+                    item.ratingKey != null
+                        ? String(item.ratingKey)
+                        : item.jellyfinId != null
+                          ? String(item.jellyfinId)
+                          : item.key != null
+                            ? String(item.key)
+                            : '';
+                return source + '|' + server + '|' + rk;
+            }
+
+            function movieLibraryKey(lib) {
+                if (!lib) return '';
+                let source = lib.mediaSource || lib.source || lib.serverType || 'plex';
+                let server = lib.serverName || (lib._server && lib._server.name) || '';
+                let sk =
+                    lib.sectionKey != null
+                        ? String(lib.sectionKey)
+                        : lib.librarySectionKey != null
+                          ? String(lib.librarySectionKey)
+                          : '';
+                return source + '|' + server + '|' + sk;
+            }
+
+            function findServerForItem(item) {
+                let ms = item.mediaSource || item.source || item.serverType || 'plex';
+                let name = item.serverName || (item._server && item._server.name) || '';
+                for (let i = 0; i < scope.servers.length; i++) {
+                    let s = scope.servers[i];
+                    if ((s.source || 'plex') === ms && s.name === name) {
+                        return s;
+                    }
+                }
+                if (item._server) return item._server;
+                return null;
+            }
+
+            function textMatch(hay, q) {
+                if (!q) return true;
+                if (hay == null) return false;
+                return String(hay).toLowerCase().indexOf(q) >= 0;
+            }
+
+            scope.movieDisplayTitle = (item) => {
+                if (!item) return '';
+                let t = item.title || item.name || '';
+                if (item.year != null && item.year !== '') {
+                    t += ' (' + item.year + ')';
+                }
+                return t;
+            };
+
+            scope.movieHasFilter = () => {
+                return !!(
+                    String(scope.movieFilter || '').trim()
+                    || String(scope.movieSummaryFilter || '').trim()
+                );
+            };
+
+            scope.movieLibVisible = (lib) => {
+                if (!lib) return false;
+                if (!scope.movieHasFilter()) return true;
+                if (scope._movieSearchHits) {
+                    let lk = movieLibraryKey(lib);
+                    if (scope._movieSearchHits.libraryKeys[lk]) return true;
+                    // also show if any nested selected movie is a hit
+                    if (lib.nested && lib.nested.length) {
+                        for (let i = 0; i < lib.nested.length; i++) {
+                            if (scope.movieChildVisible(lib.nested[i])) return true;
+                        }
+                    }
+                    return false;
+                }
+                // Local title-only filter on library name
+                let q = String(scope.movieFilter || '').trim().toLowerCase();
+                if (q && textMatch(lib.title, q)) return true;
+                if (lib.nested && lib.nested.length) {
+                    for (let i = 0; i < lib.nested.length; i++) {
+                        if (scope.movieChildVisible(lib.nested[i])) return true;
+                    }
+                }
+                return !q; // summary-only without hits yet → hide until search returns
+            };
+
+            scope.movieChildVisible = (movie) => {
+                if (!movie) return false;
+                if (!scope.movieHasFilter()) return true;
+                if (scope._movieSearchHits) {
+                    return !!scope._movieSearchHits.movieKeys[movieIdentityKey(movie)];
+                }
+                let q = String(scope.movieFilter || '').trim().toLowerCase();
+                let sq = String(scope.movieSummaryFilter || '').trim().toLowerCase();
+                let titleOk = !q || textMatch(movie.title, q) || textMatch(movie.originalTitle, q);
+                let sumOk = !sq || textMatch(movie.summary, sq);
+                return titleOk && sumOk;
+            };
+
+            scope.visibleMovieLibCount = () => {
+                let n = 0;
+                for (let i = 0; i < scope.movies.length; i++) {
+                    if (scope.movieLibVisible(scope.movies[i])) n++;
+                }
+                return n;
+            };
+
+            scope.selectedMovieCount = () => {
+                let n = 0;
+                for (let i = 0; i < scope.movies.length; i++) {
+                    let lib = scope.movies[i];
+                    if (lib.nested) {
+                        for (let j = 0; j < lib.nested.length; j++) {
+                            if (lib.nested[j].selected && scope.movieChildVisible(lib.nested[j])) {
+                                n++;
+                            } else if (lib.nested[j].selected) {
+                                n++;
+                            }
+                        }
+                    }
+                }
+                return n;
+            };
+
+            scope.visibleMovieLeafCount = () => {
+                let n = 0;
+                for (let i = 0; i < scope.movies.length; i++) {
+                    let lib = scope.movies[i];
+                    if (!scope.movieLibVisible(lib)) continue;
+                    if (!lib.nested) continue;
+                    for (let j = 0; j < lib.nested.length; j++) {
+                        if (scope.movieChildVisible(lib.nested[j])) n++;
+                    }
+                }
+                return n;
+            };
+
+            async function ensureMovieLibraryLoaded(lib) {
+                if (!lib) return;
+                if (typeof lib.nested !== 'undefined') {
+                    return;
+                }
+                lib.loadingNested = true;
+                $timeout();
+                try {
+                    let server = findServerForItem(lib);
+                    if (!server) {
+                        lib.nested = [];
+                    } else {
+                        let api = mediaApi(lib.mediaSource || lib.source || 'plex');
+                        let nested = await api.getNested(server, lib, false, []);
+                        nested = (nested || []).filter((n) => n && n.type === 'movie');
+                        for (let i = 0; i < nested.length; i++) {
+                            nested[i].selected = false;
+                            nested[i].mediaSource = lib.mediaSource || lib.source || 'plex';
+                            nested[i].source = nested[i].mediaSource;
+                            nested[i].serverType = nested[i].mediaSource;
+                            nested[i].serverName = lib.serverName || server.name;
+                            nested[i].serverKey = server.name;
+                            nested[i]._server = server;
+                            if (typeof nested[i].commercials === 'undefined') {
+                                nested[i].commercials = [];
+                            }
+                        }
+                        lib.nested = sortByTitle(nested);
+                    }
+                } catch (err) {
+                    console.error(err);
+                    lib.nested = [];
+                    scope.errors.push(
+                        'Failed to load movies for “' + (lib.title || 'library') + '”.'
+                    );
+                } finally {
+                    lib.loadingNested = false;
+                    $timeout();
+                }
+            }
+
+            scope.toggleMovieLibrary = async (lib) => {
+                if (!lib || scope.importing) return;
+                if (lib.collapse) {
+                    lib.collapse = false;
+                    $timeout();
+                    return;
+                }
+                await ensureMovieLibraryLoaded(lib);
+                lib.collapse = true;
+                $timeout();
+            };
+
+            let _movieFilterSeq = 0;
+            scope.onMovieFilterChange = async () => {
+                let q = String(scope.movieFilter || '').trim();
+                let sq = String(scope.movieSummaryFilter || '').trim();
+                if (!q && !sq) {
+                    scope._movieSearchHits = null;
+                    $timeout();
+                    return;
+                }
+                // Title-only: filter locally (library name + already-loaded nested titles)
+                if (q && !sq) {
+                    scope._movieSearchHits = null;
+                    // Expand libraries so nested title matches can appear
+                    scope.movieSearching = true;
+                    $timeout();
+                    try {
+                        let qLower = q.toLowerCase();
+                        for (let i = 0; i < scope.movies.length; i++) {
+                            let lib = scope.movies[i];
+                            // Load children when library name alone may not match the title query
+                            if (typeof lib.nested === 'undefined' && !textMatch(lib.title, qLower)) {
+                                await ensureMovieLibraryLoaded(lib);
+                            }
+                            if (lib.nested && lib.nested.length) {
+                                let any = false;
+                                for (let j = 0; j < lib.nested.length; j++) {
+                                    if (scope.movieChildVisible(lib.nested[j])) {
+                                        any = true;
+                                        break;
+                                    }
+                                }
+                                if (any || textMatch(lib.title, qLower)) {
+                                    lib.collapse = true;
+                                }
+                            } else if (textMatch(lib.title, qLower)) {
+                                lib.collapse = true;
+                            }
+                        }
+                    } finally {
+                        scope.movieSearching = false;
+                        $timeout();
+                    }
+                    return;
+                }
+                // Summary (or title+summary): one server in-memory cache search
+                let seq = ++_movieFilterSeq;
+                scope.movieSearching = true;
+                $timeout();
+                try {
+                    let result = await dizquetv.searchLibraryCache({
+                        title: q,
+                        summary: sq,
+                        limit: 4000,
+                    });
+                    if (seq !== _movieFilterSeq) return;
+                    let movieKeys = {};
+                    let libraryKeys = {};
+                    let movies = (result && result.movies) || [];
+                    for (let i = 0; i < movies.length; i++) {
+                        let m = movies[i];
+                        let k =
+                            (m.source || '') +
+                            '|' +
+                            (m.serverName || '') +
+                            '|' +
+                            String(m.ratingKey || m.jellyfinId || '');
+                        movieKeys[k] = true;
+                        if (m.librarySectionKey != null) {
+                            libraryKeys[
+                                (m.source || '') +
+                                    '|' +
+                                    (m.serverName || '') +
+                                    '|' +
+                                    String(m.librarySectionKey)
+                            ] = true;
+                        }
+                    }
+                    scope._movieSearchHits = {
+                        movieKeys: movieKeys,
+                        libraryKeys: libraryKeys,
+                    };
+                    // Expand hit libraries and load nested for leaf checkboxes
+                    for (let i = 0; i < scope.movies.length; i++) {
+                        let lib = scope.movies[i];
+                        if (!scope.movieLibVisible(lib)) {
+                            lib.collapse = false;
+                            continue;
+                        }
+                        await ensureMovieLibraryLoaded(lib);
+                        lib.collapse = true;
+                    }
+                } catch (err) {
+                    console.error(err);
+                    scope._movieSearchHits = null;
+                } finally {
+                    if (seq === _movieFilterSeq) {
+                        scope.movieSearching = false;
+                    }
+                    $timeout();
+                }
+            };
+
+            /**
+             * Select only currently filtered (visible) movies under one library.
+             * Used by the tree + control — never selects the whole unfiltered library.
+             */
+            scope.addFilteredMoviesInLibrary = async (lib) => {
+                if (!lib || scope.importing) return;
+                await ensureMovieLibraryLoaded(lib);
+                lib.collapse = true;
+                lib.selected = false;
+                let nested = lib.nested || [];
+                let any = false;
+                for (let j = 0; j < nested.length; j++) {
+                    if (scope.movieChildVisible(nested[j])) {
+                        nested[j].selected = true;
+                        any = true;
+                    }
+                }
+                if (!any && scope.movieHasFilter()) {
+                    // No visible children for current filter
+                }
+                $timeout();
+            };
+
+            /**
+             * Add all: select only movies that match the current title/summary filter
+             * (across all visible libraries). Never bulk-selects unfiltered whole libraries.
+             */
+            scope.selectAllVisibleMovies = async () => {
+                if (scope.importing) return;
+                scope.movieSearching = true;
+                $timeout();
+                try {
+                    for (let i = 0; i < scope.movies.length; i++) {
+                        let lib = scope.movies[i];
+                        lib.selected = false;
+                        if (!scope.movieLibVisible(lib)) {
+                            // Clear any prior selection under hidden libraries
+                            if (lib.nested) {
+                                for (let j = 0; j < lib.nested.length; j++) {
+                                    lib.nested[j].selected = false;
+                                }
+                            }
+                            continue;
+                        }
+                        await ensureMovieLibraryLoaded(lib);
+                        lib.collapse = true;
+                        let nested = lib.nested || [];
+                        for (let j = 0; j < nested.length; j++) {
+                            // Only currently filtered / visible items
+                            nested[j].selected = scope.movieChildVisible(nested[j]);
+                        }
+                    }
+                } finally {
+                    scope.movieSearching = false;
+                    $timeout();
+                }
+            };
+
+            function collectMovieSelections() {
+                let out = [];
+                let seen = {};
+                for (let i = 0; i < scope.movies.length; i++) {
+                    let lib = scope.movies[i];
+                    // Never import a whole library node from lib.selected —
+                    // only individually selected (filtered) movies.
+                    if (lib.nested) {
+                        for (let j = 0; j < lib.nested.length; j++) {
+                            let m = lib.nested[j];
+                            if (!m.selected) continue;
+                            let k = 'm:' + movieIdentityKey(m);
+                            if (seen[k]) continue;
+                            seen[k] = true;
+                            out.push(m);
+                        }
+                    }
+                }
+                return out;
+            }
+
             scope.cancel = () => {
                 if (scope.importing) {
                     return;
@@ -384,7 +819,7 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                 if (scope.importing) {
                     return;
                 }
-                let selected = [];
+                let selected = collectMovieSelections();
                 for (let i = 0; i < scope.lists.length; i++) {
                     if (scope.lists[i].selected) {
                         selected.push(scope.lists[i]);
@@ -395,13 +830,10 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                         selected.push(scope.shows[i]);
                     }
                 }
-                for (let i = 0; i < scope.customShows.length; i++) {
-                    if (scope.customShows[i].selected) {
-                        selected.push(scope.customShows[i]);
-                    }
-                }
                 if (selected.length === 0) {
-                    scope.errors = ["Select at least one playlist, collection, TV show, or custom programming."];
+                    scope.errors = [
+                        "Select at least one movie, movie library, playlist, collection, TV show, or custom show.",
+                    ];
                     $timeout();
                     return;
                 }
@@ -488,6 +920,40 @@ module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, common
                                     console.error(err);
                                     expandErrors.push(
                                         `Failed custom programming "${source.title}".`
+                                    );
+                                }
+                                continue;
+                            }
+
+                            if (
+                                source.type === 'external-list'
+                                || mediaSource === 'list'
+                                || source.trackedListId
+                            ) {
+                                try {
+                                    let listId = source.trackedListId || source.key;
+                                    let payload = await dizquetv.getTrackedListPrograms(listId);
+                                    let more = (payload && payload.programs) || [];
+                                    if (!more.length) {
+                                        expandErrors.push(
+                                            `Tracked list "${source.title}" has no matched programs.`
+                                        );
+                                        continue;
+                                    }
+                                    for (let t = 0; t < more.length; t++) {
+                                        let item = JSON.parse(JSON.stringify(more[t]));
+                                        if (typeof item.commercials === 'undefined') {
+                                            item.commercials = [];
+                                        }
+                                        item.trackedListId = listId;
+                                        item.trackedListName = source.title;
+                                        programs.push(item);
+                                    }
+                                    contentSources.push(makeContentSource(null, source));
+                                } catch (err) {
+                                    console.error(err);
+                                    expandErrors.push(
+                                        `Failed tracked list "${source.title}".`
                                     );
                                 }
                                 continue;

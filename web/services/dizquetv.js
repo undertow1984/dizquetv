@@ -90,6 +90,19 @@ module.exports = function ($http, $q) {
                 headers: { 'Content-Type': 'application/json; charset=utf-8' },
             }).then((d) => { return d.data })
         },
+        /**
+         * Fast title/summary search against server in-memory library cache
+         * (Plex + Jellyfin). Used by programming filter boxes.
+         */
+        searchLibraryCache: (opts) => {
+            return $http({
+                method: 'POST',
+                url: '/api/library-cache/search',
+                data: opts || {},
+                headers: { 'Content-Type': 'application/json; charset=utf-8' },
+                timeout: 60000,
+            }).then((d) => { return d.data })
+        },
         addPlexServer: (plexServer) => {
             return $http({
                 method: 'PUT',
@@ -613,6 +626,12 @@ module.exports = function ($http, $q) {
         },
         getTrackedList: (id) => {
             return $http.get('/api/tracked-lists/' + encodeURIComponent(id)).then((d) => d.data);
+        },
+        /** Full matched programs for import / expand (not the slim Lists UI payload). */
+        getTrackedListPrograms: (id) => {
+            return $http
+                .get('/api/tracked-lists/' + encodeURIComponent(id) + '/programs')
+                .then((d) => d.data);
         },
         createTrackedList: (body) => {
             return $http({

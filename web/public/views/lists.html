@@ -111,11 +111,12 @@
                         ng-disabled="busy || detailLoading">
                         <span class="fa fa-sync"></span> Refresh
                     </button>
-                    <button type="button" class="btn btn-sm btn-success"
-                        ng-if="selected && selected.channelNumber == null"
-                        ng-click="createChannelForList(selected)"
-                        ng-disabled="busy || detailLoading || !selected.matchedCount">
-                        Create channel
+                    <button type="button" class="btn btn-sm btn-primary"
+                        ng-if="selected"
+                        ng-click="saveListIdentity()"
+                        ng-disabled="busy || detailLoading || !edit || !edit.name.trim()">
+                        <span class="fa fa-spinner fa-spin" ng-show="busy"></span>
+                        Update
                     </button>
                 </div>
                 <div class="card-body small" ng-show="detailLoading">
@@ -123,14 +124,14 @@
                 </div>
                 <div class="card-body small" ng-show="selected && !detailLoading">
                     <div class="form-row align-items-end mb-2">
-                        <div class="form-group col-md-7 mb-2">
+                        <div class="form-group col-md-8 mb-2">
                             <label class="small mb-1">Name</label>
                             <input type="text" class="form-control form-control-sm"
                                 ng-model="edit.name"
                                 ng-disabled="busy"
                                 autocomplete="off" />
                         </div>
-                        <div class="form-group col-md-3 mb-2">
+                        <div class="form-group col-md-4 mb-2">
                             <label class="small mb-1">Channel #</label>
                             <input type="number" min="1" step="1" class="form-control form-control-sm"
                                 placeholder="—"
@@ -138,18 +139,11 @@
                                 ng-disabled="busy"
                                 autocomplete="off" />
                         </div>
-                        <div class="form-group col-md-2 mb-2">
-                            <button type="button" class="btn btn-sm btn-primary btn-block"
-                                ng-click="saveListIdentity()"
-                                ng-disabled="busy || !edit.name.trim()">
-                                <span class="fa fa-spinner fa-spin" ng-show="busy"></span>
-                                {{ busy ? '…' : 'Save' }}
-                            </button>
-                        </div>
                     </div>
                     <p class="text-muted small mb-2">
                         Name and channel number stay in sync with <a href="#!/channels">Channels</a>.
                         Leave channel # empty to unlink (does not delete the channel).
+                        Use <strong>Update</strong> to save settings (and re-match if URL/CSV changed).
                     </p>
 
                     <div class="border rounded p-2 mb-2">
@@ -210,12 +204,22 @@
                             </label>
                         </div>
                         <div class="form-group mb-2 mt-1 ml-3" ng-show="edit.pushToPlex && hasPlex">
-                            <label class="small mb-1" for="edit-plex-lib">Plex library</label>
-                            <select id="edit-plex-lib" class="form-control form-control-sm"
-                                ng-model="edit.plexLibraryRef"
-                                ng-disabled="busy || plexLibraries.length === 0">
-                                <option value="">Select library…</option>
-                                <option ng-repeat="lib in plexLibraries track by (lib.serverName + '|' + lib.sectionKey)"
+                            <label class="small mb-1" for="edit-plex-lib-movies">Plex library movies</label>
+                            <select id="edit-plex-lib-movies" class="form-control form-control-sm"
+                                ng-model="edit.plexMovieLibraryRef"
+                                ng-disabled="busy || plexMovieLibraries().length === 0">
+                                <option value="">Select movie library…</option>
+                                <option ng-repeat="lib in plexMovieLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
+                                    value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                    {{ lib.label }}
+                                </option>
+                            </select>
+                            <label class="small mb-1 mt-2" for="edit-plex-lib-tv">Plex library TV</label>
+                            <select id="edit-plex-lib-tv" class="form-control form-control-sm"
+                                ng-model="edit.plexTvLibraryRef"
+                                ng-disabled="busy || plexTvLibraries().length === 0">
+                                <option value="">Select TV library…</option>
+                                <option ng-repeat="lib in plexTvLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
                                     value="{{ lib.serverName + '|' + lib.sectionKey }}">
                                     {{ lib.label }}
                                 </option>
@@ -234,12 +238,21 @@
                             </label>
                         </div>
                         <small class="form-text text-muted mb-0">
-                            Creates/updates a playlist named after this list on each refresh.
-                            Plex items are limited to the selected library.
+                            On refresh, movies go into a playlist named after this list (Movies library),
+                            and TV goes into a playlist named “list name TV” (TV library).
                         </small>
-                        <div class="small text-muted mt-1" ng-if="selected.plexPlaylistId || selected.jellyfinPlaylistId || selected.plexLibraryTitle">
-                            <span ng-if="selected.plexLibraryTitle">Plex library: {{ selected.plexLibraryTitle }}</span>
-                            <span ng-if="selected.plexPlaylistId"> · playlist {{ selected.plexPlaylistId }}</span>
+                        <div class="small text-muted mt-1"
+                            ng-if="selected.plexMovieLibraryTitle || selected.plexLibraryTitle || selected.plexTvLibraryTitle || selected.plexPlaylistId || selected.plexMoviePlaylistId || selected.plexTvPlaylistId || selected.jellyfinPlaylistId">
+                            <span ng-if="selected.plexMovieLibraryTitle || selected.plexLibraryTitle">
+                                Movies: {{ selected.plexMovieLibraryTitle || selected.plexLibraryTitle }}
+                            </span>
+                            <span ng-if="selected.plexMoviePlaylistId || selected.plexPlaylistId">
+                                · pl {{ selected.plexMoviePlaylistId || selected.plexPlaylistId }}
+                            </span>
+                            <span ng-if="selected.plexTvLibraryTitle">
+                                · TV: {{ selected.plexTvLibraryTitle }}
+                            </span>
+                            <span ng-if="selected.plexTvPlaylistId"> · TV pl {{ selected.plexTvPlaylistId }}</span>
                             <span ng-if="selected.jellyfinPlaylistId"> · Jellyfin {{ selected.jellyfinPlaylistId }}</span>
                         </div>
                         <div class="small text-warning mt-1" ng-if="selected.lastPlaylistPushError">
@@ -247,10 +260,6 @@
                         </div>
                     </div>
 
-                    <div class="mb-2" ng-if="selected.url">
-                        <span class="text-muted">URL:</span>
-                        <a ng-href="{{ selected.url }}" target="_blank" rel="noopener">{{ selected.url }}</a>
-                    </div>
                     <div class="mb-2" ng-if="selected.listNameFromSource">
                         <span class="text-muted">Source title:</span> {{ selected.listNameFromSource }}
                     </div>
@@ -275,6 +284,33 @@
                         {{ selected.lastError }}
                     </div>
 
+                    <div class="border rounded p-2 mb-2">
+                        <div class="font-weight-bold small mb-2">Source</div>
+                        <div class="form-group mb-2">
+                            <label class="small mb-1">List URL</label>
+                            <input type="url" class="form-control form-control-sm"
+                                placeholder="https://letterboxd.com/… or https://trakt.tv/…"
+                                ng-model="edit.url"
+                                ng-disabled="busy"
+                                autocomplete="off" />
+                        </div>
+                        <div class="form-group mb-0">
+                            <label class="small mb-1">
+                                CSV / pasted titles
+                                <span class="text-muted font-weight-normal" ng-if="selected.csvCached">· saved in cache</span>
+                            </label>
+                            <textarea class="form-control form-control-sm" rows="5"
+                                placeholder="Paste IMDB/Letterboxd CSV or one title per line…"
+                                ng-model="edit.text"
+                                ng-disabled="busy"
+                                spellcheck="false"></textarea>
+                            <small class="form-text text-muted mb-0">
+                                CSV is stored with this list (and under cache). Edit and click <strong>Update</strong>
+                                to save and re-match. Channel/custom-show still get full episode lists for series.
+                            </small>
+                        </div>
+                    </div>
+
                     <div ng-if="selected.unmatchedSample && selected.unmatchedSample.length">
                         <strong>Not in library (sample)</strong>
                         <ul class="mb-2 pl-3" style="max-height: 8rem; overflow-y: auto;">
@@ -284,7 +320,38 @@
                         </ul>
                     </div>
 
-                    <div ng-if="selected.programs && selected.programs.length">
+                    <div ng-if="selected.matchedDisplay && selected.matchedDisplay.length">
+                        <strong>Matched</strong>
+                        <ul class="mb-0 pl-3" style="max-height: 14rem; overflow-y: auto;">
+                            <li ng-repeat="p in selected.matchedDisplay track by $index">
+                                <span class="badge border text-uppercase mr-1"
+                                    style="font-size: 0.6rem;"
+                                    ng-class="{
+                                        'badge-primary': p.kind === 'movie',
+                                        'badge-info': p.kind === 'show',
+                                        'badge-secondary': p.kind === 'episode'
+                                    }">{{ p.kind }}</span>
+                                <span ng-if="p.kind === 'movie'">
+                                    {{ p.title }}
+                                    <span class="text-muted" ng-if="p.year"> ({{ p.year }})</span>
+                                </span>
+                                <span ng-if="p.kind === 'show'">
+                                    {{ p.title }}
+                                    <span class="text-muted" ng-if="p.year"> ({{ p.year }})</span>
+                                    <span class="text-muted" ng-if="p.episodeCount">
+                                        · {{ p.episodeCount }} episode<span ng-if="p.episodeCount !== 1">s</span>
+                                    </span>
+                                </span>
+                                <span ng-if="p.kind === 'episode'">
+                                    <span class="text-muted" ng-if="p.showTitle">{{ p.showTitle }} — </span>{{ p.title }}
+                                    <span class="text-muted" ng-if="p.year"> ({{ p.year }})</span>
+                                </span>
+                                <span class="badge badge-light border text-uppercase ml-1" style="font-size: 0.6rem;"
+                                    ng-if="p.source">{{ p.source }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                    <div ng-if="(!selected.matchedDisplay || !selected.matchedDisplay.length) && selected.programs && selected.programs.length">
                         <strong>Matched programs</strong>
                         <ul class="mb-0 pl-3" style="max-height: 14rem; overflow-y: auto;">
                             <li ng-repeat="p in selected.programs track by $index">
@@ -396,12 +463,22 @@
                                 </label>
                             </div>
                             <div class="form-group mb-2 mt-1 ml-3" ng-show="form.pushToPlex && hasPlex">
-                                <label class="small mb-1" for="add-plex-lib">Plex library</label>
-                                <select id="add-plex-lib" class="form-control form-control-sm"
-                                    ng-model="form.plexLibraryRef"
-                                    ng-disabled="busy || plexLibraries.length === 0">
-                                    <option value="">Select library…</option>
-                                    <option ng-repeat="lib in plexLibraries track by (lib.serverName + '|' + lib.sectionKey)"
+                                <label class="small mb-1" for="add-plex-lib-movies">Plex library movies</label>
+                                <select id="add-plex-lib-movies" class="form-control form-control-sm"
+                                    ng-model="form.plexMovieLibraryRef"
+                                    ng-disabled="busy || plexMovieLibraries().length === 0">
+                                    <option value="">Select movie library…</option>
+                                    <option ng-repeat="lib in plexMovieLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
+                                        value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                        {{ lib.label }}
+                                    </option>
+                                </select>
+                                <label class="small mb-1 mt-2" for="add-plex-lib-tv">Plex library TV</label>
+                                <select id="add-plex-lib-tv" class="form-control form-control-sm"
+                                    ng-model="form.plexTvLibraryRef"
+                                    ng-disabled="busy || plexTvLibraries().length === 0">
+                                    <option value="">Select TV library…</option>
+                                    <option ng-repeat="lib in plexTvLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
                                         value="{{ lib.serverName + '|' + lib.sectionKey }}">
                                         {{ lib.label }}
                                     </option>

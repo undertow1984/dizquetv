@@ -1,7 +1,8 @@
 module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolutionOptions, getShowData, commonProgramTools, libraryCatalogPreload) {
     return {
         restrict: 'E',
-        templateUrl: 'templates/channel-config.html',
+        // Cache-bust so browsers/Angular drop stale templates (ng-if child-scope search fix)
+        templateUrl: 'templates/channel-config.html?v=content-sources-lists-1',
         replace: true,
         scope: {
             visible: "=visible",
@@ -195,16 +196,40 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 scope.channel.contentSources = [];
             }
 
-            // ---- Content sources (playlists+collections, TV shows, custom programming) ----
-            /** Merged playlists + collections for the first catalog column */
+            // ---- Content sources (playlists+collections+custom, TV shows) ----
+            /** Merged playlists + collections + custom shows for the first catalog column */
             scope.contentSourceLists = [];
             scope.contentSourceShows = [];
-            scope.contentSourceCustomShows = [];
-            scope.contentSourceListFilter = "";
-            scope.contentSourceShowFilter = "";
-            scope.contentSourceCustomFilter = "";
-            /** 'all' | 'plex' | 'jellyfin' — UI filter for plex/jellyfin catalog columns */
-            scope.contentSourceMediaFilter = "all";
+            /** Filtered rows shown in the UI (rebuilt when search / All|Plex|Jellyfin changes) */
+            scope.contentSourceListsVisible = [];
+            scope.contentSourceShowsVisible = [];
+            /**
+             * UI filter state MUST be an object. Properties tab is inside ng-if="tab == 'basic'",
+             * which creates a child scope. Binding primitives (contentSourceListFilter = "…")
+             * would shadow on the child and never update the directive scope — search would no-op.
+             */
+            scope.contentSourceUi = {
+                listFilter: "",
+                showFilter: "",
+                /** 'all' | 'plex' | 'jellyfin' */
+                mediaFilter: "all",
+            };
+            // Back-compat aliases used by older template fragments / button ng-class
+            Object.defineProperty(scope, 'contentSourceMediaFilter', {
+                get: function () { return scope.contentSourceUi.mediaFilter; },
+                set: function (v) { scope.contentSourceUi.mediaFilter = v; },
+                configurable: true,
+            });
+            Object.defineProperty(scope, 'contentSourceListFilter', {
+                get: function () { return scope.contentSourceUi.listFilter; },
+                set: function (v) { scope.contentSourceUi.listFilter = v; },
+                configurable: true,
+            });
+            Object.defineProperty(scope, 'contentSourceShowFilter', {
+                get: function () { return scope.contentSourceUi.showFilter; },
+                set: function (v) { scope.contentSourceUi.showFilter = v; },
+                configurable: true,
+            });
             scope.contentSourcesLoading = false;
             scope.contentSourcesError = "";
             scope.contentSourcesSyncing = false;
@@ -216,6 +241,106 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
             // Update is blocked until this is true so we never race and strip sources.
             scope.contentSourcesLoadAttempted = false;
 
+            function sortContentSourcesByTitle(items) {
+                return (items || []).slice().sort((a, b) => {
+                    let ta = (a && (a.title || a.name) || "").toString();
+                    let tb = (b && (b.title || b.name) || "").toString();
+                    return ta.localeCompare(tb, undefined, { sensitivity: 'base', numeric: true });
+                });
+            }
+
+            function contentSourceTextMatch(item, q) {
+                if (!q) {
+                    return true;
+                }
+                if (!item) {
+                    return false;
+                }
+                let hay = [
+                    item.title,
+                    item.name,
+                    item.libraryTitle,
+                    item.serverName,
+                    item.type,
+                    item.mediaSource,
+                    item.source,
+                    item.serverType,
+                    item.provider,
+                    item.trackedListId ? 'list' : '',
+                    item.type === 'external-list' ? 'list' : '',
+                    item.type === 'custom' ? 'custom' : '',
+                ]
+                    .map((x) => (x == null ? "" : String(x)))
+                    .join(" ")
+                    .toLowerCase();
+                return hay.indexOf(q) !== -1;
+            }
+
+            /** Match All / Plex / Jellyfin toggle (custom + tracked lists always visible) */
+            function contentSourceMediaMatches(item) {
+                if (!item) return false;
+                let ms = item.mediaSource || item.serverType || item.source || 'plex';
+                if (
+                    ms === 'custom'
+                    || ms === 'list'
+                    || item.type === 'custom'
+                    || item.type === 'external-list'
+                    || item.trackedListId
+                ) {
+                    return true;
+                }
+                let mf = scope.contentSourceUi.mediaFilter || 'all';
+                if (mf === 'all') return true;
+                return ms === mf;
+            }
+
+            scope.contentSourceMediaFilterFn = contentSourceMediaMatches;
+
+            function contentSourceListMatches(item) {
+                if (!contentSourceMediaMatches(item)) {
+                    return false;
+                }
+                let q = (scope.contentSourceUi.listFilter || "").trim().toLowerCase();
+                return contentSourceTextMatch(item, q);
+            }
+
+            function contentSourceShowMatches(item) {
+                if (!contentSourceMediaMatches(item)) {
+                    return false;
+                }
+                let q = (scope.contentSourceUi.showFilter || "").trim().toLowerCase();
+                return contentSourceTextMatch(item, q);
+            }
+
+            scope.contentSourceListVisibleFn = contentSourceListMatches;
+            scope.contentSourceShowVisibleFn = contentSourceShowMatches;
+
+            /**
+             * Rebuild arrays bound to ng-repeat from full catalog + current UI filters.
+             */
+            function rebuildContentSourceVisible() {
+                let lists = scope.contentSourceLists || [];
+                let shows = scope.contentSourceShows || [];
+                let listsOut = [];
+                let showsOut = [];
+                for (let i = 0; i < lists.length; i++) {
+                    if (contentSourceListMatches(lists[i])) {
+                        listsOut.push(lists[i]);
+                    }
+                }
+                for (let j = 0; j < shows.length; j++) {
+                    if (contentSourceShowMatches(shows[j])) {
+                        showsOut.push(shows[j]);
+                    }
+                }
+                scope.contentSourceListsVisible = listsOut;
+                scope.contentSourceShowsVisible = showsOut;
+            }
+
+            scope.onContentSourceSearchChange = function () {
+                rebuildContentSourceVisible();
+            };
+
             /**
              * All / Plex / Jellyfin is pure UI: hide non-matching rows already in memory.
              * Never hits cache or network.
@@ -224,15 +349,16 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 if (v !== 'plex' && v !== 'jellyfin' && v !== 'all') {
                     return;
                 }
-                scope.contentSourceMediaFilter = v;
+                scope.contentSourceUi.mediaFilter = v;
+                rebuildContentSourceVisible();
             };
 
             /** Reset Properties media filter + search boxes (no catalog fetch). */
             function resetContentSourceUiFilters() {
-                scope.contentSourceMediaFilter = 'all';
-                scope.contentSourceListFilter = '';
-                scope.contentSourceShowFilter = '';
-                scope.contentSourceCustomFilter = '';
+                scope.contentSourceUi.mediaFilter = 'all';
+                scope.contentSourceUi.listFilter = '';
+                scope.contentSourceUi.showFilter = '';
+                rebuildContentSourceVisible();
             }
 
             /**
@@ -243,7 +369,6 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 let lists = [
                     scope.contentSourceLists || [],
                     scope.contentSourceShows || [],
-                    scope.contentSourceCustomShows || [],
                 ];
                 for (let L = 0; L < lists.length; L++) {
                     for (let i = 0; i < lists[L].length; i++) {
@@ -254,7 +379,7 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
 
             /**
              * Ensure content-source checkbox lists are bound once from session cache.
-             * Subsequent visits only reset filter UI and re-apply selection — no refetch.
+             * Subsequent visits only re-apply selection — keep the user's search text.
              */
             scope.ensureContentSourcesReady = async (forceRefresh) => {
                 if (forceRefresh) {
@@ -265,35 +390,80 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                     return;
                 }
                 if (scope.contentSourcesCatalogLoaded) {
-                    resetContentSourceUiFilters();
+                    // Only reset All/Plex/Jellyfin; keep search boxes so typing is not wiped
+                    scope.contentSourceUi.mediaFilter = 'all';
                     reapplyContentSourceSelection();
+                    rebuildContentSourceVisible();
                     $timeout();
                     return;
                 }
                 await scope.loadContentSourceCatalog(false);
             };
 
-            /** Angular filter predicate: match All / Plex / Jellyfin toggle (custom always hidden from this filter — own column) */
-            scope.contentSourceMediaFilterFn = (item) => {
-                if (!item) return false;
-                let ms = item.mediaSource || item.serverType || item.source || 'plex';
-                if (ms === 'custom' || item.type === 'custom') return true;
-                if (scope.contentSourceMediaFilter === 'all') return true;
-                return ms === scope.contentSourceMediaFilter;
+            /** Count rows currently shown (media filter + search). */
+            scope.contentSourceVisibleCount = (list, kind) => {
+                if (kind === 'shows') {
+                    return (scope.contentSourceShowsVisible || []).length;
+                }
+                return (scope.contentSourceListsVisible || []).length;
             };
 
-            scope.contentSourceFilteredCount = (list) => {
-                if (!list || !list.length) return 0;
-                let n = 0;
-                for (let i = 0; i < list.length; i++) {
-                    if (scope.contentSourceMediaFilterFn(list[i])) n++;
-                }
-                return n;
+            scope.contentSourceListTrackKey = (p) => {
+                if (!p) return 'x';
+                return (
+                    (p.mediaSource || 'plex')
+                    + '-'
+                    + (p.type || '')
+                    + '-'
+                    + (p.serverName || '')
+                    + '-'
+                    + (p.key || p.trackedListId || p.id || '')
+                    + '-'
+                    + (p.libraryTitle || '')
+                );
             };
+
+            scope.contentSourceShowTrackKey = (s) => {
+                if (!s) return 'x';
+                return (
+                    (s.mediaSource || 'plex')
+                    + '-'
+                    + (s.serverName || '')
+                    + '-'
+                    + (s.key || '')
+                    + '-'
+                    + (s.libraryTitle || '')
+                );
+            };
+
+            // Keep visible lists in sync even if something else mutates filters
+            scope.$watch(
+                function () {
+                    return (
+                        scope.contentSourceUi.listFilter
+                        + '\0'
+                        + scope.contentSourceUi.showFilter
+                        + '\0'
+                        + scope.contentSourceUi.mediaFilter
+                    );
+                },
+                function () {
+                    rebuildContentSourceVisible();
+                }
+            );
 
             function contentSourceId(src) {
                 // mediaSource separates Plex vs Jellyfin when server names collide
                 let ms = src.mediaSource || src.serverType || src.source || 'plex';
+                // Tracked lists: stable id independent of provider/url key variants
+                if (
+                    src.trackedListId
+                    || src.type === 'external-list'
+                    || ms === 'list'
+                ) {
+                    let tid = src.trackedListId || src.key || '';
+                    return 'list\0\0external-list\0' + String(tid);
+                }
                 return String(ms) + "\0" + (src.serverName || "") + "\0" + (src.type || "") + "\0" + (src.key || "");
             }
 
@@ -302,8 +472,20 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                     return false;
                 }
                 let id = contentSourceId(item);
+                let tid = item && (item.trackedListId || (item.type === 'external-list' ? item.key : null));
                 for (let i = 0; i < scope.channel.contentSources.length; i++) {
-                    if (contentSourceId(scope.channel.contentSources[i]) === id) {
+                    let src = scope.channel.contentSources[i];
+                    if (contentSourceId(src) === id) {
+                        return true;
+                    }
+                    if (
+                        tid
+                        && src
+                        && (
+                            src.trackedListId === tid
+                            || (src.type === 'external-list' && (src.trackedListId === tid || src.key === tid))
+                        )
+                    ) {
                         return true;
                     }
                 }
@@ -340,6 +522,9 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                     libraryType: item.libraryType || null,
                     jellyfinId: item.jellyfinId || item.ratingKey || null,
                     ratingKey: item.ratingKey || null,
+                    trackedListId: item.trackedListId || null,
+                    externalProvider: item.provider || item.externalProvider || null,
+                    externalUrl: item.externalUrl || item.url || null,
                     lastSyncedAt: prev && prev.lastSyncedAt ? prev.lastSyncedAt : null,
                 };
             }
@@ -365,7 +550,6 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 let lists = [
                     scope.contentSourceLists || [],
                     scope.contentSourceShows || [],
-                    scope.contentSourceCustomShows || [],
                 ];
                 for (let L = 0; L < lists.length; L++) {
                     for (let i = 0; i < lists[L].length; i++) {
@@ -383,8 +567,7 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 if (selected.length === 0 && prev.length > 0) {
                     let catalogSize =
                         (scope.contentSourceLists || []).length
-                        + (scope.contentSourceShows || []).length
-                        + (scope.contentSourceCustomShows || []).length;
+                        + (scope.contentSourceShows || []).length;
                     if (catalogSize === 0) {
                         console.warn(
                             "dizqueTV: refusing to clear contentSources — catalog empty after load"
@@ -437,7 +620,6 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 let lists = [
                     scope.contentSourceLists || [],
                     scope.contentSourceShows || [],
-                    scope.contentSourceCustomShows || [],
                 ];
                 for (let L = 0; L < lists.length; L++) {
                     for (let i = 0; i < lists[L].length; i++) {
@@ -461,7 +643,8 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                 scope.contentSourcesError = "";
                 scope.contentSourceLists = [];
                 scope.contentSourceShows = [];
-                scope.contentSourceCustomShows = [];
+                scope.contentSourceListsVisible = [];
+                scope.contentSourceShowsVisible = [];
                 $timeout();
                 try {
                     if (forceRefresh) {
@@ -477,27 +660,31 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                     // Plex/Jellyfin lists may come from session cache; custom shows always live
                     let lists = (catalog.lists || []).map((x) => Object.assign({}, x));
                     let shows = (catalog.shows || []).map((x) => Object.assign({}, x));
+                    // Fold custom shows + tracked lists into Playlists/Lists/Custom/Collections
                     let liveCustoms = await libraryCatalogPreload.fetchCustomShowsLive();
                     let customShows = (liveCustoms || []).map((cs) => ({
                         type: 'custom',
                         key: cs.id,
-                        title: cs.name,
-                        name: cs.name,
+                        title: cs.name || cs.title || 'Custom show',
+                        name: cs.name || cs.title || 'Custom show',
                         count: cs.count,
                         serverName: '',
                         mediaSource: 'custom',
                         source: 'custom',
                         serverType: 'custom',
                     }));
+                    let trackedLists = await libraryCatalogPreload.fetchTrackedListsLive();
+                    // Single A–Z list: playlists, collections, custom shows, and tracked lists
+                    lists = sortContentSourcesByTitle(
+                        lists.concat(customShows).concat(trackedLists || [])
+                    );
+                    shows = sortContentSourcesByTitle(shows);
 
                     for (let i = 0; i < lists.length; i++) {
                         lists[i].selected = isContentSourceSynced(lists[i]);
                     }
                     for (let i = 0; i < shows.length; i++) {
                         shows[i].selected = isContentSourceSynced(shows[i]);
-                    }
-                    for (let i = 0; i < customShows.length; i++) {
-                        customShows[i].selected = isContentSourceSynced(customShows[i]);
                     }
 
                     let warnings = catalog.warnings || [];
@@ -516,7 +703,6 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                     if (
                         lists.length === 0
                         && shows.length === 0
-                        && customShows.length === 0
                         && !scope.contentSourcesError
                     ) {
                         scope.contentSourcesError =
@@ -525,7 +711,7 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
 
                     scope.contentSourceLists = lists;
                     scope.contentSourceShows = shows;
-                    scope.contentSourceCustomShows = customShows;
+                    rebuildContentSourceVisible();
                     scope.contentSourcesCatalogLoaded = true;
                     syncContentSourcesFromCatalog();
                 } catch (err) {
@@ -593,6 +779,39 @@ module.exports = function ($timeout, $location, dizquetv, plex, jellyfin, resolu
                         } catch (err) {
                             console.error(err);
                             warnings.push('Failed custom programming: ' + (src.title || src.key));
+                        }
+                        continue;
+                    }
+
+                    // Tracked lists (Library → Lists: Letterboxd / Trakt / etc.)
+                    if (
+                        src.type === 'external-list'
+                        || mediaSource === 'list'
+                        || src.trackedListId
+                    ) {
+                        try {
+                            let listId = src.trackedListId || src.key;
+                            let payload = await dizquetv.getTrackedListPrograms(listId);
+                            let more = (payload && payload.programs) || [];
+                            if (!more.length) {
+                                warnings.push(
+                                    'Tracked list has no matched programs: ' + (src.title || listId)
+                                );
+                                continue;
+                            }
+                            for (let t = 0; t < more.length; t++) {
+                                let item = JSON.parse(JSON.stringify(more[t]));
+                                if (typeof item.commercials === 'undefined') {
+                                    item.commercials = [];
+                                }
+                                item.trackedListId = listId;
+                                item.trackedListName = src.title;
+                                programs.push(item);
+                            }
+                            src.lastSyncedAt = new Date().toISOString();
+                        } catch (err) {
+                            console.error(err);
+                            warnings.push('Failed tracked list: ' + (src.title || src.key));
                         }
                         continue;
                     }

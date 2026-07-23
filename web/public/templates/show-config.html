@@ -6,9 +6,74 @@
                     <h5 class="modal-title">{{title}}</h5>
                 </div>
                 <div class="modal-body">
-                    <div class="form-group">
-                        <label for="name">Show Name:</label>
-                        <input type="text" class="form-control" id="name" placeholder="Show Name" ng-model="name"></input>
+                    <div class="form-row align-items-start">
+                        <div class="form-group col-md-5 mb-2">
+                            <label for="name">Show Name:</label>
+                            <input type="text" class="form-control" id="name" placeholder="Show Name" ng-model="name"></input>
+                        </div>
+                        <div class="form-group col-md-7 mb-2">
+                            <div class="border rounded p-2 bg-light h-100">
+                                <div class="font-weight-bold small mb-1">Save as media playlist</div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="show-push-plex"
+                                        ng-model="pushToPlex"
+                                        ng-disabled="!hasPlex" />
+                                    <label class="form-check-label small" for="show-push-plex">
+                                        Plex playlist
+                                        <span class="text-muted" ng-if="!hasPlex">(no Plex server in Settings)</span>
+                                    </label>
+                                </div>
+                                <div class="form-group mb-2 mt-1 ml-3" ng-show="pushToPlex && hasPlex">
+                                    <label class="small mb-1" for="show-plex-lib-movies">Plex library movies</label>
+                                    <select id="show-plex-lib-movies" class="form-control form-control-sm"
+                                        ng-model="plexMovieLibraryRef"
+                                        ng-disabled="plexMovieLibraries().length === 0">
+                                        <option value="">Select movie library…</option>
+                                        <option ng-repeat="lib in plexMovieLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
+                                            value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                            {{ lib.label }}
+                                        </option>
+                                    </select>
+                                    <label class="small mb-1 mt-2" for="show-plex-lib-tv">Plex library TV</label>
+                                    <select id="show-plex-lib-tv" class="form-control form-control-sm"
+                                        ng-model="plexTvLibraryRef"
+                                        ng-disabled="plexTvLibraries().length === 0">
+                                        <option value="">Select TV library…</option>
+                                        <option ng-repeat="lib in plexTvLibraries() track by (lib.serverName + '|' + lib.sectionKey)"
+                                            value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                            {{ lib.label }}
+                                        </option>
+                                    </select>
+                                    <small class="form-text text-muted" ng-if="plexLibraries.length === 0">
+                                        Sync Plex libraries under Library → Management first.
+                                    </small>
+                                </div>
+                                <div class="form-check mb-0">
+                                    <input class="form-check-input" type="checkbox" id="show-push-jellyfin"
+                                        ng-model="pushToJellyfin"
+                                        ng-disabled="!hasJellyfin" />
+                                    <label class="form-check-label small" for="show-push-jellyfin">
+                                        Jellyfin playlist
+                                        <span class="text-muted" ng-if="!hasJellyfin">(no Jellyfin server in Settings)</span>
+                                    </label>
+                                </div>
+                                <small class="form-text text-muted mb-0">
+                                    On save, movies go into a playlist named after this show (Movies library),
+                                    and TV goes into a playlist named “show name TV” (TV library).
+                                </small>
+                                <div class="small text-muted mt-1"
+                                    ng-if="plexMovieLibraryTitle || plexTvLibraryTitle || plexMoviePlaylistId || plexTvPlaylistId || jellyfinPlaylistId">
+                                    <span ng-if="plexMovieLibraryTitle">Movies: {{ plexMovieLibraryTitle }}</span>
+                                    <span ng-if="plexMoviePlaylistId"> · pl {{ plexMoviePlaylistId }}</span>
+                                    <span ng-if="plexTvLibraryTitle"> · TV: {{ plexTvLibraryTitle }}</span>
+                                    <span ng-if="plexTvPlaylistId"> · TV pl {{ plexTvPlaylistId }}</span>
+                                    <span ng-if="jellyfinPlaylistId"> · Jellyfin {{ jellyfinPlaylistId }}</span>
+                                </div>
+                                <div class="small text-warning mt-1" ng-if="lastPlaylistPushError">
+                                    {{ lastPlaylistPushError }}
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <h6 class="mt-3">Add programming</h6>
@@ -78,25 +143,30 @@
                         </div>
                     </div>
 
-                    <div class="list-group list-group-root"
-                        dnd-list=""
-                        dnd-drop="dropFunction(index , item)"
-                        ng-init="setUpWatcher()"
-                        style="max-height: 220px; overflow-y: auto;">
-                        <div class="list-group-item flex-container show-row" style="cursor: default; height:1.1em; overflow:hidden"
-                            ng-repeat="x in content" track-by="x.$index"
+                    <div class="list-group list-group-root show-list"
+                        dnd-list="content"
+                        dnd-drop="dropFunction(index, item)"
+                        style="max-height: 220px; overflow-y: auto; min-height: 3rem;">
+                        <div class="list-group-item text-muted small py-3 text-center"
+                            ng-if="!content.length">
+                            No clips yet — add items from the library above.
+                        </div>
+                        <div class="list-group-item flex-container show-row program-row"
+                            style="cursor: default;"
+                            ng-repeat="x in content track by $index"
                             dnd-draggable="x"
                             dnd-effect-allowed="move"
-                            dnd-moved="movedFunction(x.$index)">
+                            dnd-moved="contentSplice($index, 1)">
                             <div class="program-start">
-                                X{{ (x.$index + 1).toString().padStart(2, '0') }}
+                                X{{ ($index + 1).toString().padStart(2, '0') }}
                             </div>
-                            <div ng-style="programSquareStyle(x, false)"></div>
-                            <div class="title">
+                            <div ng-style="programSquareStyle(x)"></div>
+                            <div class="title flex-grow-1">
                                 {{ getProgramDisplayTitle(x) }}
                             </div>
                             <div class="flex-pull-right">
-                                <button class="btn btn-sm btn-link" ng-click="contentSplice(x.$index,1)">
+                                <button type="button" class="btn btn-sm btn-link"
+                                    ng-click="contentSplice($index, 1); $event.stopPropagation()">
                                     <i class="text-danger fa fa-trash-alt"></i>
                                 </button>
                             </div>
