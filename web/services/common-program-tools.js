@@ -143,24 +143,34 @@ module.exports = function (getShowData) {
 
 
     let removeDuplicates = (progs) => {
-        let tmpProgs = {}
+        // Walk in order so flex slots keep their place relative to content.
+        // Flex (offline, not redirect) is not media and has no show identity —
+        // previously it was dropped entirely, which wiped flex on channel save
+        // when content sources re-ran removeDuplicates.
+        let seen = {};
+        let newProgs = [];
         for (let i = 0, l = progs.length; i < l; i++) {
-            if ( progs[i].type ==='redirect' ) {
-                tmpProgs['_redirect ' + progs[i].channel + ' _ '+ progs[i].duration ] = progs[i];
-            } else {
-                let data = getShowData(progs[i]);
-                if (data.hasShow) {
-                    let key = data.showId + "|" + data.order;
-                    if (typeof(tmpProgs[key]) === 'undefined') {
-                        tmpProgs[key] = progs[i];
-                    }
+            let p = progs[i];
+            if (p && p.isOffline && p.type !== 'redirect') {
+                newProgs.push(p);
+                continue;
+            }
+            if (p && p.type === 'redirect') {
+                let rKey = '_redirect ' + p.channel + ' _ ' + p.duration;
+                if (typeof seen[rKey] === 'undefined') {
+                    seen[rKey] = true;
+                    newProgs.push(p);
+                }
+                continue;
+            }
+            let data = getShowData(p);
+            if (data.hasShow) {
+                let key = data.showId + '|' + data.order;
+                if (typeof seen[key] === 'undefined') {
+                    seen[key] = true;
+                    newProgs.push(p);
                 }
             }
-        }
-        let newProgs = [];
-        let keys = Object.keys(tmpProgs);
-        for (let i = 0, l = keys.length; i < l; i++) {
-            newProgs.push(tmpProgs[keys[i]])
         }
         return newProgs;
     }
