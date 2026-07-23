@@ -2,7 +2,10 @@
  * Persistent external movie lists (Letterboxd / Trakt / paste) with refresh,
  * similar to Radarr/Sonarr list sync. Matched programs come from local library cache.
  */
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const dbPaths = require('../database-paths');
 
 class TrackedListService {
     constructor(db, externalListService, channelService, customShowDB) {
@@ -10,6 +13,113 @@ class TrackedListService {
         this.externalListService = externalListService;
         this.channelService = channelService;
         this.customShowDB = customShowDB || null;
+    }
+
+    _listCsvPath(id) {
+        return path.join(dbPaths.listCsvCacheDir(), String(id) + '.csv');
+    }
+
+    _writeListCsv(id, text) {
+        try {
+            dbPaths.ensureDir(dbPaths.listCsvCacheDir());
+            let p = this._listCsvPath(id);
+            let body = text != null ? String(text) : '';
+            if (body.trim()) {
+                fs.writeFileSync(p, body, 'utf8');
+            } else if (fs.existsSync(p)) {
+                fs.unlinkSync(p);
+            }
+        } catch (e) {
+            console.error('tracked-list: write CSV cache failed', e.message || e);
+        }
+    }
+
+    _readListCsv(id) {
+        try {
+            let p = this._listCsvPath(id);
+            if (fs.existsSync(p)) {
+                return fs.readFileSync(p, 'utf8');
+            }
+        } catch (e) {
+            console.error('tracked-list: read CSV cache failed', e.message || e);
+        }
+        return null;
+    }
+
+    _deleteListCsv(id) {
+        try {
+            let p = this._listCsvPath(id);
+            if (fs.existsSync(p)) fs.unlinkSync(p);
+        } catch (e) {
+            /* ignore */
+        }
+    }
+
+    /**
+     * UI summary of matches: one row per list title.
+     * Shows whole shows (not every episode), episodes with parent show, movies labeled.
+     */
+    _buildMatchedDisplay(matchedRows) {
+        let groups = {};
+        let order = [];
+        for (let i = 0; i < (matchedRows || []).length; i++) {
+            let row = matchedRows[i];
+            if (!row || !row.program) continue;
+            let pos = row.position != null ? row.position : i + 1;
+            let key = String(pos);
+            if (!groups[key]) {
+                groups[key] = [];
+                order.push(key);
+            }
+            groups[key].push(row);
+        }
+        let out = [];
+        for (let o = 0; o < order.length; o++) {
+            let rows = groups[order[o]];
+            let first = rows[0];
+            let p = first.program || {};
+            let match = String(first.match || '');
+            // Full-series expansion uses match tags ending in "-episodes"
+            let isShowExpand =
+                /(?:^|-)episodes$/i.test(match)
+                || (
+                    rows.length > 1
+                    && rows.every((r) => r.program && r.program.type === 'episode')
+                );
+            let isEpisode =
+                !isShowExpand
+                && (
+                    p.type === 'episode'
+                    || /^episode/i.test(match)
+                    || match.indexOf('episode-') === 0
+                );
+
+            if (isShowExpand) {
+                out.push({
+                    kind: 'show',
+                    title: first.title || p.showTitle || p.title || 'Show',
+                    year: first.year != null ? first.year : null,
+                    episodeCount: rows.length,
+                    source: p.source || p.serverType || null,
+                });
+            } else if (isEpisode) {
+                out.push({
+                    kind: 'episode',
+                    title: p.title || first.title || 'Episode',
+                    showTitle: p.showTitle || p.grandparentTitle || null,
+                    year: p.year != null ? p.year : first.year != null ? first.year : null,
+                    source: p.source || p.serverType || null,
+                });
+            } else {
+                out.push({
+                    kind: 'movie',
+                    title: p.title || first.title || 'Movie',
+                    year: p.year != null ? p.year : first.year != null ? first.year : null,
+                    source: p.source || p.serverType || null,
+                });
+            }
+        }
+        return out;
     }
 
     _all() {
@@ -60,7 +170,46 @@ class TrackedListService {
         return this._toPublic(doc);
     }
 
+    /**
+     * Full matched program objects for channel/import/add-programming expand.
+     * Public get() returns slim rows for the Lists UI only.
+     */
+    getPrograms(id) {
+        let doc = this._findById(id);
+        if (!doc) return null;
+        let programs = Array.isArray(doc.programs) ? doc.programs : [];
+        return programs.map((p) => {
+            let item = Object.assign({}, p);
+            if (typeof item.commercials === 'undefined') item.commercials = [];
+            return item;
+        });
+    }
+
+    /**
+     * Migrate legacy single Plex library fields → Movies library fields.
+     * Keeps legacy aliases in sync for older clients.
+     */
+    _applyPlexLibraryMigration(doc) {
+        if (!doc) return doc;
+        if (!doc.plexMovieSectionKey && doc.plexSectionKey) {
+            doc.plexMovieServerName = doc.plexServerName || null;
+            doc.plexMovieSectionKey =
+                doc.plexSectionKey != null ? String(doc.plexSectionKey) : null;
+            doc.plexMovieLibraryTitle = doc.plexLibraryTitle || null;
+            doc.plexMoviePlaylistId = doc.plexPlaylistId || null;
+        }
+        // Mirror movie fields onto legacy names
+        if (doc.plexMovieSectionKey) {
+            doc.plexServerName = doc.plexMovieServerName || null;
+            doc.plexSectionKey = String(doc.plexMovieSectionKey);
+            doc.plexLibraryTitle = doc.plexMovieLibraryTitle || null;
+            doc.plexPlaylistId = doc.plexMoviePlaylistId || null;
+        }
+        return doc;
+    }
+
     _toSummary(doc) {
+        this._applyPlexLibraryMigration(doc);
         return {
             id: doc.id,
             name: doc.name,
@@ -74,10 +223,27 @@ class TrackedListService {
             customShowId: doc.customShowId || null,
             pushToPlex: !!doc.pushToPlex,
             pushToJellyfin: !!doc.pushToJellyfin,
-            plexServerName: doc.plexServerName || null,
-            plexSectionKey: doc.plexSectionKey != null ? String(doc.plexSectionKey) : null,
-            plexLibraryTitle: doc.plexLibraryTitle || null,
-            plexPlaylistId: doc.plexPlaylistId || null,
+            // Movies library (also mirrored as legacy plex*)
+            plexServerName: doc.plexMovieServerName || doc.plexServerName || null,
+            plexSectionKey:
+                doc.plexMovieSectionKey != null
+                    ? String(doc.plexMovieSectionKey)
+                    : (doc.plexSectionKey != null ? String(doc.plexSectionKey) : null),
+            plexLibraryTitle: doc.plexMovieLibraryTitle || doc.plexLibraryTitle || null,
+            plexPlaylistId: doc.plexMoviePlaylistId || doc.plexPlaylistId || null,
+            plexMovieServerName: doc.plexMovieServerName || doc.plexServerName || null,
+            plexMovieSectionKey:
+                doc.plexMovieSectionKey != null
+                    ? String(doc.plexMovieSectionKey)
+                    : (doc.plexSectionKey != null ? String(doc.plexSectionKey) : null),
+            plexMovieLibraryTitle: doc.plexMovieLibraryTitle || doc.plexLibraryTitle || null,
+            plexMoviePlaylistId: doc.plexMoviePlaylistId || doc.plexPlaylistId || null,
+            // TV library
+            plexTvServerName: doc.plexTvServerName || null,
+            plexTvSectionKey:
+                doc.plexTvSectionKey != null ? String(doc.plexTvSectionKey) : null,
+            plexTvLibraryTitle: doc.plexTvLibraryTitle || null,
+            plexTvPlaylistId: doc.plexTvPlaylistId || null,
             jellyfinPlaylistId: doc.jellyfinPlaylistId || null,
             lastPlaylistPushAt: doc.lastPlaylistPushAt || null,
             lastPlaylistPushError: doc.lastPlaylistPushError || null,
@@ -94,13 +260,23 @@ class TrackedListService {
     }
 
     _toPublic(doc) {
+        let text = doc.text || '';
+        if (!text) {
+            let fromFile = this._readListCsv(doc.id);
+            if (fromFile) text = fromFile;
+        }
         return Object.assign({}, this._toSummary(doc), {
-            text: doc.text || '',
+            text: text,
+            csvCached: !!(text && String(text).trim()),
             unmatchedSample: Array.isArray(doc.unmatchedSample) ? doc.unmatchedSample : [],
-            // Slim program list for UI (title + year + source)
+            // Grouped matches for UI (show / episode / movie) — not expanded episode lists
+            matchedDisplay: Array.isArray(doc.matchedDisplay) ? doc.matchedDisplay : [],
+            // Slim program list kept for debugging / legacy; prefer matchedDisplay in UI
             programs: (doc.programs || []).map((p) => ({
                 title: p.title,
                 year: p.year,
+                type: p.type || null,
+                showTitle: p.showTitle || p.grandparentTitle || null,
                 source: p.source || p.serverType,
                 serverKey: p.serverKey || p.serverName,
                 ratingKey: p.ratingKey || p.key,
@@ -204,36 +380,113 @@ class TrackedListService {
         return out;
     }
 
-    _normalizePlexLibraryRef(input) {
+    /**
+     * Resolve a Plex library target from explicit fields and/or "server|section" ref.
+     * @param {object} input
+     * @param {'movie'|'tv'} kind
+     */
+    _normalizePlexLibraryKind(input, kind) {
         input = input || {};
-        let serverName = input.plexServerName ? String(input.plexServerName).trim() : '';
+        kind = kind === 'tv' ? 'tv' : 'movie';
+        let serverKey =
+            kind === 'tv' ? 'plexTvServerName' : 'plexMovieServerName';
+        let sectionKeyName =
+            kind === 'tv' ? 'plexTvSectionKey' : 'plexMovieSectionKey';
+        let titleKey =
+            kind === 'tv' ? 'plexTvLibraryTitle' : 'plexMovieLibraryTitle';
+        let refKey =
+            kind === 'tv' ? 'plexTvLibraryRef' : 'plexMovieLibraryRef';
+
+        let serverName = input[serverKey] ? String(input[serverKey]).trim() : '';
         let sectionKey =
-            input.plexSectionKey != null && input.plexSectionKey !== ''
-                ? String(input.plexSectionKey).trim()
+            input[sectionKeyName] != null && input[sectionKeyName] !== ''
+                ? String(input[sectionKeyName]).trim()
                 : '';
-        let libraryTitle = input.plexLibraryTitle ? String(input.plexLibraryTitle).trim() : '';
-        // Combined value from UI: "serverName|sectionKey"
-        if ((!serverName || !sectionKey) && input.plexLibraryRef) {
-            let parts = String(input.plexLibraryRef).split('|');
+        let libraryTitle = input[titleKey] ? String(input[titleKey]).trim() : '';
+
+        // Combined UI value
+        let ref = input[refKey];
+        // Legacy single-library form: plexLibraryRef / plexServerName → movies
+        if (kind === 'movie') {
+            if (!serverName && input.plexServerName) {
+                serverName = String(input.plexServerName).trim();
+            }
+            if (!sectionKey && input.plexSectionKey != null && input.plexSectionKey !== '') {
+                sectionKey = String(input.plexSectionKey).trim();
+            }
+            if (!libraryTitle && input.plexLibraryTitle) {
+                libraryTitle = String(input.plexLibraryTitle).trim();
+            }
+            if (!ref && input.plexLibraryRef) {
+                ref = input.plexLibraryRef;
+            }
+        }
+        if ((!serverName || !sectionKey) && ref) {
+            let parts = String(ref).split('|');
             if (parts.length >= 2) {
                 serverName = parts[0];
                 sectionKey = parts.slice(1).join('|');
             }
         }
+        let wantType = kind === 'tv' ? 'show' : 'movie';
         if (serverName && sectionKey && !libraryTitle) {
             let libs = this.listPlexLibrariesForPlaylists();
             for (let i = 0; i < libs.length; i++) {
-                if (libs[i].serverName === serverName && String(libs[i].sectionKey) === sectionKey) {
+                if (
+                    libs[i].serverName === serverName
+                    && String(libs[i].sectionKey) === sectionKey
+                ) {
                     libraryTitle = libs[i].title;
                     break;
                 }
             }
         }
+        // Prefer matching library type when resolving title only
+        if (serverName && sectionKey) {
+            let libs = this.listPlexLibrariesForPlaylists();
+            for (let i = 0; i < libs.length; i++) {
+                if (
+                    libs[i].serverName === serverName
+                    && String(libs[i].sectionKey) === sectionKey
+                    && libs[i].type
+                    && libs[i].type !== wantType
+                ) {
+                    // Still allow — user may have mis-tagged cache; do not reject here
+                }
+            }
+        }
         return {
-            plexServerName: serverName || null,
-            plexSectionKey: sectionKey || null,
-            plexLibraryTitle: libraryTitle || null,
+            serverName: serverName || null,
+            sectionKey: sectionKey || null,
+            libraryTitle: libraryTitle || null,
         };
+    }
+
+    /** @deprecated legacy single-library helper — resolves Movies library */
+    _normalizePlexLibraryRef(input) {
+        let m = this._normalizePlexLibraryKind(input, 'movie');
+        return {
+            plexServerName: m.serverName,
+            plexSectionKey: m.sectionKey,
+            plexLibraryTitle: m.libraryTitle,
+        };
+    }
+
+    _applyDualPlexLibrariesToDoc(doc, input) {
+        input = input || {};
+        let movie = this._normalizePlexLibraryKind(input, 'movie');
+        let tv = this._normalizePlexLibraryKind(input, 'tv');
+        doc.plexMovieServerName = movie.serverName;
+        doc.plexMovieSectionKey = movie.sectionKey;
+        doc.plexMovieLibraryTitle = movie.libraryTitle;
+        doc.plexTvServerName = tv.serverName;
+        doc.plexTvSectionKey = tv.sectionKey;
+        doc.plexTvLibraryTitle = tv.libraryTitle;
+        // Legacy aliases = movies
+        doc.plexServerName = movie.serverName;
+        doc.plexSectionKey = movie.sectionKey;
+        doc.plexLibraryTitle = movie.libraryTitle;
+        return doc;
     }
 
     /**
@@ -255,12 +508,14 @@ class TrackedListService {
         let now = Date.now();
         let pushToPlex = !!input.pushToPlex && this._hasPlexServer();
         let pushToJellyfin = !!input.pushToJellyfin && this._hasJellyfinServer();
-        let plexLib = this._normalizePlexLibraryRef(input);
-        if (pushToPlex && !plexLib.plexSectionKey) {
-            throw new Error('Select a Plex library for the playlist.');
+        let movieLib = this._normalizePlexLibraryKind(input, 'movie');
+        let tvLib = this._normalizePlexLibraryKind(input, 'tv');
+        if (pushToPlex && !movieLib.sectionKey && !tvLib.sectionKey) {
+            throw new Error('Select a Plex Movies and/or TV library for the playlist.');
         }
         if (!pushToPlex) {
-            plexLib = { plexServerName: null, plexSectionKey: null, plexLibraryTitle: null };
+            movieLib = { serverName: null, sectionKey: null, libraryTitle: null };
+            tvLib = { serverName: null, sectionKey: null, libraryTitle: null };
         }
         let doc = {
             id: id,
@@ -274,9 +529,18 @@ class TrackedListService {
             customShowId: null,
             pushToPlex: pushToPlex,
             pushToJellyfin: pushToJellyfin,
-            plexServerName: plexLib.plexServerName,
-            plexSectionKey: plexLib.plexSectionKey,
-            plexLibraryTitle: plexLib.plexLibraryTitle,
+            plexMovieServerName: movieLib.serverName,
+            plexMovieSectionKey: movieLib.sectionKey,
+            plexMovieLibraryTitle: movieLib.libraryTitle,
+            plexMoviePlaylistId: null,
+            plexTvServerName: tvLib.serverName,
+            plexTvSectionKey: tvLib.sectionKey,
+            plexTvLibraryTitle: tvLib.libraryTitle,
+            plexTvPlaylistId: null,
+            // Legacy aliases = movies
+            plexServerName: movieLib.serverName,
+            plexSectionKey: movieLib.sectionKey,
+            plexLibraryTitle: movieLib.libraryTitle,
             plexPlaylistId: null,
             jellyfinPlaylistId: null,
             lastPlaylistPushAt: null,
@@ -289,11 +553,15 @@ class TrackedListService {
             unmatchedCount: 0,
             unmatchedSample: [],
             programs: [],
+            matchedDisplay: [],
             listNameFromSource: null,
             createdAt: now,
             updatedAt: now,
         };
         doc = this._save(doc);
+        if (text) {
+            this._writeListCsv(id, text);
+        }
 
         // First refresh resolves + matches (+ optional channel / custom show / media playlists)
         let refreshed = await this.refresh(id, {
@@ -324,7 +592,9 @@ class TrackedListService {
             doc.url = patch.url.trim() || null;
         }
         if (typeof patch.text === 'string') {
-            doc.text = patch.text.trim() || null;
+            doc.text = patch.text; // allow multi-line CSV as pasted
+            // Persist CSV/text into cache (same idea as keeping the list URL)
+            this._writeListCsv(doc.id, doc.text);
         }
         if (typeof patch.createChannel !== 'undefined') {
             doc.createChannel = !!patch.createChannel;
@@ -342,6 +612,14 @@ class TrackedListService {
                 doc.plexServerName = null;
                 doc.plexSectionKey = null;
                 doc.plexLibraryTitle = null;
+                doc.plexMovieServerName = null;
+                doc.plexMovieSectionKey = null;
+                doc.plexMovieLibraryTitle = null;
+                doc.plexMoviePlaylistId = null;
+                doc.plexTvServerName = null;
+                doc.plexTvSectionKey = null;
+                doc.plexTvLibraryTitle = null;
+                doc.plexTvPlaylistId = null;
             }
         }
         if (typeof patch.pushToJellyfin !== 'undefined') {
@@ -350,25 +628,24 @@ class TrackedListService {
                 doc.jellyfinPlaylistId = null;
             }
         }
-        // Plex library target for playlist (required when pushToPlex)
-        if (
-            typeof patch.plexServerName !== 'undefined'
-            || typeof patch.plexSectionKey !== 'undefined'
-            || typeof patch.plexLibraryRef !== 'undefined'
-            || typeof patch.plexLibraryTitle !== 'undefined'
-        ) {
-            let plexLib = this._normalizePlexLibraryRef(Object.assign({}, doc, patch));
-            if (doc.pushToPlex) {
-                if (!plexLib.plexSectionKey) {
-                    throw new Error('Select a Plex library for the playlist.');
-                }
-                doc.plexServerName = plexLib.plexServerName;
-                doc.plexSectionKey = plexLib.plexSectionKey;
-                doc.plexLibraryTitle = plexLib.plexLibraryTitle;
+        // Plex Movies / TV library targets (required: at least one when pushToPlex)
+        let plexPatchKeys = [
+            'plexServerName', 'plexSectionKey', 'plexLibraryRef', 'plexLibraryTitle',
+            'plexMovieServerName', 'plexMovieSectionKey', 'plexMovieLibraryRef', 'plexMovieLibraryTitle',
+            'plexTvServerName', 'plexTvSectionKey', 'plexTvLibraryRef', 'plexTvLibraryTitle',
+        ];
+        let hasPlexLibPatch = false;
+        for (let i = 0; i < plexPatchKeys.length; i++) {
+            if (typeof patch[plexPatchKeys[i]] !== 'undefined') {
+                hasPlexLibPatch = true;
+                break;
             }
         }
-        if (doc.pushToPlex && !doc.plexSectionKey) {
-            throw new Error('Select a Plex library for the playlist.');
+        if (hasPlexLibPatch || doc.pushToPlex) {
+            this._applyDualPlexLibrariesToDoc(doc, Object.assign({}, doc, patch));
+            if (doc.pushToPlex && !doc.plexMovieSectionKey && !doc.plexTvSectionKey) {
+                throw new Error('Select a Plex Movies and/or TV library for the playlist.');
+            }
         }
 
         let newChannelNumber = prevChannelNumber;
@@ -608,6 +885,7 @@ class TrackedListService {
             } else {
                 this.db['tracked-lists'].remove({ id: doc.id });
             }
+            this._deleteListCsv(doc.id || id);
         } catch (e) {
             console.error('tracked-list delete failed', e.message || e);
             throw new Error('Failed to delete list.');
@@ -624,9 +902,22 @@ class TrackedListService {
         let doc = this._findById(id);
         if (!doc) throw new Error('List not found.');
 
+        // Prefer in-doc text; fall back to cached CSV file
+        let text = doc.text || '';
+        if (!String(text).trim()) {
+            let fromFile = this._readListCsv(doc.id);
+            if (fromFile) {
+                text = fromFile;
+                doc.text = fromFile;
+            }
+        } else {
+            // Keep cache file in sync with stored text
+            this._writeListCsv(doc.id, text);
+        }
+
         let resolveInput = {
             url: doc.url || '',
-            text: doc.text || '',
+            text: text || '',
             traktClientId: options.traktClientId,
         };
 
@@ -650,6 +941,10 @@ class TrackedListService {
             if (!p) continue;
             let item = Object.assign({}, p);
             if (typeof item.commercials === 'undefined') item.commercials = [];
+            // Keep list-row metadata for channel/program use
+            item._listTitle = row.title || null;
+            item._listMatch = row.match || null;
+            item._listPosition = row.position != null ? row.position : i + 1;
             let key =
                 (item.source || '') +
                 '|' +
@@ -664,10 +959,15 @@ class TrackedListService {
         doc.provider = result.provider || doc.provider;
         doc.listNameFromSource = result.listName || doc.listNameFromSource;
         doc.itemCount = result.itemCount || 0;
-        doc.matchedCount = programs.length;
+        // Count list titles matched (not expanded episode programs)
+        doc.matchedCount =
+            typeof result.matchedCount === 'number'
+                ? result.matchedCount
+                : programs.length;
         doc.unmatchedCount = result.unmatchedCount || 0;
         doc.unmatchedSample = (result.unmatched || []).slice(0, 40);
         doc.programs = programs;
+        doc.matchedDisplay = this._buildMatchedDisplay(result.matched || []);
         doc.lastRefreshAt = Date.now();
         doc.lastRefreshOk = true;
         doc.lastError = null;
@@ -741,30 +1041,121 @@ class TrackedListService {
     }
 
     /**
-     * Create or replace a video playlist on Plex/Jellyfin from matched programs.
+     * Public entry for custom shows (and other callers) to create/update
+     * Plex/Jellyfin playlists from an array of programs using the same logic as Lists.
+     * Mutates `doc` with playlist ids and lastPlaylistPush* fields.
+     */
+    async pushPlaylistsFromPrograms(doc, programs) {
+        if (!doc) {
+            throw new Error('Missing playlist config');
+        }
+        return this._pushMediaPlaylists(doc, programs || []);
+    }
+
+    /**
+     * Split programs into movie vs TV (show/episode/season) for dual Plex playlists.
+     */
+    _filterProgramsByMediaKind(programs, kind) {
+        let out = [];
+        for (let i = 0; i < (programs || []).length; i++) {
+            let p = programs[i];
+            if (!p) continue;
+            let t = p.type || '';
+            if (kind === 'movie') {
+                if (t === 'movie') out.push(p);
+            } else if (kind === 'show') {
+                if (t === 'show' || t === 'episode' || t === 'season') out.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Create or replace video playlist(s) on Plex/Jellyfin from matched programs.
+     * Plex: separate Movies + TV libraries → two playlists when both are set.
      */
     async _pushMediaPlaylists(doc, programs) {
         let errors = [];
         let pushed = false;
+        this._applyPlexLibraryMigration(doc);
 
         if (doc.pushToPlex && this._hasPlexServer()) {
-            try {
-                if (!doc.plexSectionKey) {
-                    throw new Error('no Plex library selected');
+            let movieSection =
+                doc.plexMovieSectionKey != null
+                    ? String(doc.plexMovieSectionKey)
+                    : (doc.plexSectionKey != null ? String(doc.plexSectionKey) : null);
+            let tvSection =
+                doc.plexTvSectionKey != null ? String(doc.plexTvSectionKey) : null;
+            let movieServer = doc.plexMovieServerName || doc.plexServerName || null;
+            let tvServer = doc.plexTvServerName || null;
+            let movieTitle = doc.plexMovieLibraryTitle || doc.plexLibraryTitle || null;
+            let tvTitle = doc.plexTvLibraryTitle || null;
+
+            if (!movieSection && !tvSection) {
+                errors.push('Plex: select a Movies and/or TV library');
+            } else {
+                if (movieSection) {
+                    try {
+                        let movieProgs = this._filterProgramsByMediaKind(programs, 'movie');
+                        let plexIds = this._collectPlexRatingKeys(movieProgs, {
+                            plexServerName: movieServer,
+                            plexSectionKey: movieSection,
+                            kind: 'movie',
+                        });
+                        if (!plexIds.length) {
+                            errors.push(
+                                'Plex movies: no matched movies in library “' +
+                                (movieTitle || movieSection) + '”'
+                            );
+                        } else {
+                            let id = await this._upsertPlexPlaylist(
+                                {
+                                    serverName: movieServer,
+                                    playlistId:
+                                        doc.plexMoviePlaylistId || doc.plexPlaylistId || null,
+                                    title: doc.name || 'dizqueTV list',
+                                },
+                                plexIds
+                            );
+                            doc.plexMoviePlaylistId = id;
+                            doc.plexPlaylistId = id;
+                            pushed = true;
+                        }
+                    } catch (e) {
+                        errors.push('Plex movies: ' + (e.message || e));
+                    }
                 }
-                let plexIds = this._collectPlexRatingKeys(programs, doc);
-                if (!plexIds.length) {
-                    errors.push(
-                        'Plex: no matched titles found in library “' +
-                        (doc.plexLibraryTitle || doc.plexSectionKey) + '”'
-                    );
-                } else {
-                    let id = await this._upsertPlexPlaylist(doc, plexIds);
-                    doc.plexPlaylistId = id;
-                    pushed = true;
+                if (tvSection) {
+                    try {
+                        let tvProgs = this._filterProgramsByMediaKind(programs, 'show');
+                        let plexIds = this._collectPlexRatingKeys(tvProgs, {
+                            plexServerName: tvServer,
+                            plexSectionKey: tvSection,
+                            kind: 'show',
+                        });
+                        if (!plexIds.length) {
+                            errors.push(
+                                'Plex TV: no matched shows/episodes in library “' +
+                                (tvTitle || tvSection) + '”'
+                            );
+                        } else {
+                            let id = await this._upsertPlexPlaylist(
+                                {
+                                    serverName: tvServer,
+                                    playlistId: doc.plexTvPlaylistId || null,
+                                    title: (doc.name || 'dizqueTV list') + ' TV',
+                                },
+                                plexIds
+                            );
+                            doc.plexTvPlaylistId = id;
+                            pushed = true;
+                        }
+                    } catch (e) {
+                        errors.push('Plex TV: ' + (e.message || e));
+                    }
                 }
-            } catch (e) {
-                errors.push('Plex: ' + (e.message || e));
             }
         }
 
@@ -805,6 +1196,8 @@ class TrackedListService {
 
     /**
      * Plex rating keys for playlist, limited to the selected library section when set.
+     * @param {object[]} programs
+     * @param {object} doc  { plexServerName, plexSectionKey, kind: 'movie'|'show' }
      */
     _collectPlexRatingKeys(programs, doc) {
         doc = doc || {};
@@ -812,17 +1205,25 @@ class TrackedListService {
         let seen = {};
         let sectionKey = doc.plexSectionKey != null ? String(doc.plexSectionKey) : null;
         let serverName = doc.plexServerName || null;
+        let kind = doc.kind === 'show' ? 'show' : 'movie';
 
         // Preferred: membership in selected library cache
         let libItems = null;
+        let libShows = null;
+        let libEpisodes = null;
         if (sectionKey) {
             let plexCache = this.externalListService && this.externalListService.plexCache;
             let server = this._getPlexServerByName(serverName);
             let sName = (server && server.name) || serverName;
             if (plexCache && sName && typeof plexCache.getCachedLibraryData === 'function') {
                 let data = plexCache.getCachedLibraryData(sName, sectionKey);
-                if (data && data.items) {
-                    libItems = data.items;
+                if (data) {
+                    if (kind === 'show') {
+                        libShows = data.shows || {};
+                        libEpisodes = data.episodes || {};
+                    } else {
+                        libItems = data.items || {};
+                    }
                 }
             }
         }
@@ -842,15 +1243,30 @@ class TrackedListService {
             if (!rk || seen[rk]) continue;
             if (!/^\d+$/.test(rk)) continue;
 
-            if (libItems) {
-                if (!libItems[rk]) continue;
-            } else if (sectionKey) {
-                // Fallback: match librarySectionID on program when present
-                let ps =
-                    p.librarySectionID != null
-                        ? String(p.librarySectionID)
-                        : (p.sectionKey != null ? String(p.sectionKey) : null);
-                if (ps != null && ps !== sectionKey) continue;
+            if (kind === 'movie') {
+                if (libItems) {
+                    if (!libItems[rk]) continue;
+                } else if (sectionKey) {
+                    let ps =
+                        p.librarySectionID != null
+                            ? String(p.librarySectionID)
+                            : (p.sectionKey != null ? String(p.sectionKey) : null);
+                    if (ps != null && ps !== sectionKey) continue;
+                }
+            } else {
+                // TV: episodes or shows in the TV library cache
+                if (libEpisodes || libShows) {
+                    let inLib =
+                        (libEpisodes && libEpisodes[rk])
+                        || (libShows && libShows[rk]);
+                    if (!inLib) continue;
+                } else if (sectionKey) {
+                    let ps =
+                        p.librarySectionID != null
+                            ? String(p.librarySectionID)
+                            : (p.sectionKey != null ? String(p.sectionKey) : null);
+                    if (ps != null && ps !== sectionKey) continue;
+                }
             }
 
             if (serverName && p.serverKey && String(p.serverKey) !== String(serverName)) {
@@ -1005,24 +1421,35 @@ class TrackedListService {
         return bestScore >= 50 ? best : null;
     }
 
-    async _upsertPlexPlaylist(doc, ratingKeys) {
+    /**
+     * @param {{ serverName?: string, playlistId?: string|null, title?: string }} opts
+     * @param {string[]} ratingKeys
+     * @returns {Promise<string>} new playlist ratingKey
+     */
+    async _upsertPlexPlaylist(opts, ratingKeys) {
+        opts = opts || {};
+        // Back-compat: older callers passed (doc, keys)
+        if (opts && opts.name != null && !opts.title && arguments.length >= 1) {
+            // no-op — new signature always uses opts object
+        }
         const Plex = require('../plex');
-        let server = this._getPlexServerByName(doc.plexServerName) || this._firstPlexServer();
+        let server =
+            this._getPlexServerByName(opts.serverName)
+            || this._firstPlexServer();
         if (!server) throw new Error('No Plex server configured');
         let client = new Plex(server);
         let root = await client.Get('/');
         let machineId = root.machineIdentifier;
         if (!machineId) throw new Error('Could not read Plex machineIdentifier');
 
-        let title = doc.name || 'dizqueTV list';
+        let title = opts.title || 'dizqueTV list';
         // Drop existing playlist if we have an id (replace contents cleanly)
-        if (doc.plexPlaylistId) {
+        if (opts.playlistId) {
             try {
-                await client.Delete('/playlists/' + doc.plexPlaylistId);
+                await client.Delete('/playlists/' + opts.playlistId);
             } catch (e) {
                 console.error('plex playlist delete (may be ok)', e.message || e);
             }
-            doc.plexPlaylistId = null;
         }
 
         // Create with first item, then append batches

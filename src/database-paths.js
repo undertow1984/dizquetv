@@ -94,6 +94,11 @@ function subtitlesCacheDir() {
     return path.join(cacheDir(), 'subtitles');
 }
 
+/** Pasted CSV / list text files for tracked external lists */
+function listCsvCacheDir() {
+    return path.join(cacheDir(), 'list-csv');
+}
+
 function imagesDir() {
     return path.join(dbRoot(), 'images');
 }
@@ -334,6 +339,7 @@ module.exports = {
     plexCacheDir,
     playCacheDir,
     subtitlesCacheDir,
+    listCsvCacheDir,
     imagesDir,
     channelLogosDir,
     imagesUploadsDir,

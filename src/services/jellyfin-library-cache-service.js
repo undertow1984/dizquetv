@@ -2075,6 +2075,174 @@ class JellyfinLibraryCacheService {
         }
         return { list: list, fromCache: true };
     }
+
+    /**
+     * Fast in-process search of the Jellyfin library cache (no live Jellyfin HTTP).
+     * @param {{ title?: string, summary?: string, limit?: number }} opts
+     */
+    searchCached(opts) {
+        opts = opts || {};
+        let titleQ = String(opts.title || '').trim().toLowerCase();
+        let summaryQ = String(opts.summary || '').trim().toLowerCase();
+        if (!titleQ && !summaryQ) {
+            return { movies: [], shows: [], episodes: [], fromCache: true };
+        }
+        let limit = parseInt(opts.limit, 10);
+        if (isNaN(limit) || limit < 1) limit = 2500;
+        if (limit > 8000) limit = 8000;
+
+        let movies = [];
+        let showsByKey = {};
+        let episodes = [];
+
+        const has = (hay, q) => {
+            if (!q) return true;
+            if (hay == null || hay === '') return false;
+            return String(hay).toLowerCase().indexOf(q) >= 0;
+        };
+        const matches = (obj) => {
+            if (!obj) return false;
+            let titleOk =
+                !titleQ
+                || has(obj.title, titleQ)
+                || has(obj.originalTitle, titleQ)
+                || has(obj.showTitle, titleQ)
+                || has(obj.grandparentTitle, titleQ)
+                || has(obj.parentTitle, titleQ)
+                || has(obj.SeriesName, titleQ);
+            let sumOk =
+                !summaryQ
+                || has(obj.summary, summaryQ)
+                || has(obj.Overview, summaryQ);
+            return titleOk && sumOk;
+        };
+        const ensureShow = (serverName, rk, title, year) => {
+            if (rk == null || rk === '') return null;
+            let k = serverName + '|' + String(rk);
+            if (!showsByKey[k]) {
+                showsByKey[k] = {
+                    source: 'jellyfin',
+                    serverName: serverName,
+                    ratingKey: String(rk),
+                    jellyfinId: String(rk),
+                    title: title || '',
+                    year: year != null ? year : null,
+                    matchedVia: 'show',
+                };
+            }
+            return showsByKey[k];
+        };
+
+        let serverNames = Object.keys(this._mem || {});
+        for (let s = 0; s < serverNames.length; s++) {
+            let serverName = serverNames[s];
+            let mem = this._mem[serverName];
+            if (!mem || !mem.libraries) continue;
+            let libKeys = Object.keys(mem.libraries);
+            for (let li = 0; li < libKeys.length; li++) {
+                let data = mem.libraries[libKeys[li]];
+                if (!data) continue;
+                let sectionKey =
+                    data.sectionKey != null ? String(data.sectionKey) : String(libKeys[li]);
+                if (this._isDisabled && this._isDisabled(serverName, sectionKey)) continue;
+                if (this._isHidden && this._isHidden(serverName, sectionKey)) continue;
+
+                let items = data.items || {};
+                let ikeys = Object.keys(items);
+                for (let i = 0; i < ikeys.length; i++) {
+                    let p = items[ikeys[i]];
+                    if (!p || (p.type && p.type !== 'movie')) continue;
+                    if (!matches(p)) continue;
+                    if (movies.length < limit) {
+                        movies.push({
+                            source: 'jellyfin',
+                            serverName: serverName,
+                            ratingKey: p.ratingKey != null ? String(p.ratingKey) : String(ikeys[i]),
+                            jellyfinId: p.jellyfinId || p.ratingKey || ikeys[i],
+                            title: p.title || '',
+                            year: p.year != null ? p.year : null,
+                            librarySectionKey: sectionKey,
+                        });
+                    }
+                }
+
+                let shows = data.shows || {};
+                let skeys = Object.keys(shows);
+                for (let i = 0; i < skeys.length; i++) {
+                    let sh = shows[skeys[i]];
+                    if (!sh) continue;
+                    if (!matches(sh)) continue;
+                    let entry = ensureShow(
+                        serverName,
+                        sh.ratingKey || sh.jellyfinId || skeys[i],
+                        sh.title,
+                        sh.year
+                    );
+                    if (entry) entry.matchedVia = 'show';
+                }
+
+                let eps = data.episodes || {};
+                let ekeys = Object.keys(eps);
+                for (let i = 0; i < ekeys.length; i++) {
+                    let ep = eps[ekeys[i]];
+                    if (!ep) continue;
+                    if (ep.type && ep.type !== 'episode') continue;
+                    if (!matches(ep)) continue;
+                    let epRk =
+                        ep.ratingKey != null
+                            ? String(ep.ratingKey)
+                            : ep.jellyfinId != null
+                              ? String(ep.jellyfinId)
+                              : String(ekeys[i]);
+                    let showRk =
+                        ep.seriesId != null
+                            ? String(ep.seriesId)
+                            : ep.grandparentRatingKey != null
+                              ? String(ep.grandparentRatingKey)
+                              : null;
+                    if (showRk) {
+                        let entry = ensureShow(
+                            serverName,
+                            showRk,
+                            ep.showTitle || ep.grandparentTitle || '',
+                            null
+                        );
+                        if (entry && entry.matchedVia !== 'show') {
+                            entry.matchedVia = 'episode';
+                        }
+                    }
+                    if (episodes.length < limit) {
+                        episodes.push({
+                            source: 'jellyfin',
+                            serverName: serverName,
+                            ratingKey: epRk,
+                            jellyfinId: ep.jellyfinId || epRk,
+                            title: ep.title || '',
+                            showTitle: ep.showTitle || ep.grandparentTitle || '',
+                            year: ep.year != null ? ep.year : null,
+                            season: ep.season != null ? ep.season : ep.parentIndex,
+                            episode: ep.episode != null ? ep.episode : ep.index,
+                            grandparentRatingKey: showRk,
+                            parentRatingKey:
+                                ep.seasonId != null
+                                    ? String(ep.seasonId)
+                                    : ep.parentRatingKey != null
+                                      ? String(ep.parentRatingKey)
+                                      : null,
+                            librarySectionKey: sectionKey,
+                        });
+                    }
+                }
+            }
+        }
+
+        return {
+            movies: movies,
+            shows: Object.keys(showsByKey).map((k) => showsByKey[k]),
+            episodes: episodes,
+            fromCache: true,
+        };
+    }
 }
 
 module.exports = JellyfinLibraryCacheService;

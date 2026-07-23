@@ -105,13 +105,16 @@ class CustomShowDB {
     }
 
     async getAllShowsInfo() {
-        //returns just name and id
+        //returns just name and id (+ playlist push flags for list UI)
         let shows = await this.getAllShows();
         return shows.map( (f) =>  {
             return {
                 'id'  : f.id,
                 'name': f.name,
                 'count': f.content.length,
+                pushToPlex: !!f.pushToPlex,
+                pushToJellyfin: !!f.pushToJellyfin,
+                plexLibraryTitle: f.plexLibraryTitle || null,
             }
         } );
     }
@@ -126,6 +129,34 @@ function fixup(json) {
     if (typeof(json.name) === 'undefined') {
         json.name = "Unnamed Show";
     }
+    // Optional: save as Plex / Jellyfin playlist (same idea as Library → Lists)
+    json.pushToPlex = !!json.pushToPlex;
+    json.pushToJellyfin = !!json.pushToJellyfin;
+    // Dual Plex targets (Movies + TV); migrate legacy single library → Movies
+    if (!json.plexMovieSectionKey && json.plexSectionKey) {
+        json.plexMovieServerName = json.plexServerName || null;
+        json.plexMovieSectionKey = json.plexSectionKey;
+        json.plexMovieLibraryTitle = json.plexLibraryTitle || null;
+        json.plexMoviePlaylistId = json.plexPlaylistId || null;
+    }
+    if (typeof json.plexMovieServerName === 'undefined') json.plexMovieServerName = null;
+    if (typeof json.plexMovieSectionKey === 'undefined') json.plexMovieSectionKey = null;
+    if (typeof json.plexMovieLibraryTitle === 'undefined') json.plexMovieLibraryTitle = null;
+    if (typeof json.plexMoviePlaylistId === 'undefined') {
+        json.plexMoviePlaylistId = json.plexPlaylistId || null;
+    }
+    if (typeof json.plexTvServerName === 'undefined') json.plexTvServerName = null;
+    if (typeof json.plexTvSectionKey === 'undefined') json.plexTvSectionKey = null;
+    if (typeof json.plexTvLibraryTitle === 'undefined') json.plexTvLibraryTitle = null;
+    if (typeof json.plexTvPlaylistId === 'undefined') json.plexTvPlaylistId = null;
+    // Legacy aliases = Movies
+    json.plexServerName = json.plexMovieServerName || null;
+    json.plexSectionKey = json.plexMovieSectionKey || null;
+    json.plexLibraryTitle = json.plexMovieLibraryTitle || null;
+    json.plexPlaylistId = json.plexMoviePlaylistId || null;
+    if (typeof json.jellyfinPlaylistId === 'undefined') json.jellyfinPlaylistId = null;
+    if (typeof json.lastPlaylistPushAt === 'undefined') json.lastPlaylistPushAt = null;
+    if (typeof json.lastPlaylistPushError === 'undefined') json.lastPlaylistPushError = null;
 }
 
 module.exports = CustomShowDB;

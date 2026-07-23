@@ -1220,6 +1220,49 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     });
 
     /**
+     * Fast title/summary search against in-memory Plex + Jellyfin library caches.
+     * Used by programming UI filters (avoids expanding every show via nested HTTP).
+     * Body: { title?, summary?, limit? }
+     */
+    router.post('/api/library-cache/search', (req, res) => {
+      try {
+        let body = req.body || {};
+        let opts = {
+          title: body.title || '',
+          summary: body.summary || '',
+          limit: body.limit,
+        };
+        let movies = [];
+        let shows = [];
+        let episodes = [];
+        if (plexLibraryCacheService && typeof plexLibraryCacheService.searchCached === 'function') {
+          let pr = plexLibraryCacheService.searchCached(opts);
+          movies = movies.concat((pr && pr.movies) || []);
+          shows = shows.concat((pr && pr.shows) || []);
+          episodes = episodes.concat((pr && pr.episodes) || []);
+        }
+        if (jellyfinLibraryCacheService && typeof jellyfinLibraryCacheService.searchCached === 'function') {
+          let jr = jellyfinLibraryCacheService.searchCached(opts);
+          movies = movies.concat((jr && jr.movies) || []);
+          shows = shows.concat((jr && jr.shows) || []);
+          episodes = episodes.concat((jr && jr.episodes) || []);
+        }
+        res.send({
+          movies: movies,
+          shows: shows,
+          episodes: episodes,
+          fromCache: true,
+          movieCount: movies.length,
+          showCount: shows.length,
+          episodeCount: episodes.length,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send({ error: err.message || String(err) });
+      }
+    });
+
+    /**
      * Content-sources catalog (channel Properties + bulk import).
      * Always served from local library cache + custom shows — never contacts
      * Plex/Jellyfin live. Empty playlists/collections (count 0) are omitted.
@@ -1467,6 +1510,20 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         }
     });
 
+    /** Full matched programs for a tracked list (content sources / add programming) */
+    router.get('/api/tracked-lists/:id/programs', (req, res) => {
+        try {
+            let programs = trackedListService.getPrograms(req.params.id);
+            if (programs === null) {
+                return res.status(404).send({ ok: false, error: 'List not found' });
+            }
+            res.send({ id: req.params.id, programs: programs, count: programs.length });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
     router.post('/api/tracked-lists', async (req, res) => {
         try {
             let created = await trackedListService.create(req.body || {});
@@ -1606,6 +1663,96 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
 
 
     // Custom Shows
+    /**
+     * Persist custom show and optionally push Plex/Jellyfin playlists (Lists parity).
+     * Returns the saved show (with playlist ids / push errors when applicable).
+     */
+    async function saveCustomShowWithPlaylistPush(id, body) {
+        let show = Object.assign({}, body || {});
+        delete show.id;
+        let movieKey = show.plexMovieSectionKey || show.plexSectionKey;
+        let tvKey = show.plexTvSectionKey;
+        if (show.pushToPlex && !movieKey && !tvKey) {
+            throw new Error('Select a Plex Movies and/or TV library for the playlist.');
+        }
+        // Preserve existing playlist ids when updating so replace works
+        if (id) {
+            let prev = await customShowDB.getShow(id);
+            if (prev) {
+                if (show.plexMoviePlaylistId == null && (prev.plexMoviePlaylistId || prev.plexPlaylistId)) {
+                    show.plexMoviePlaylistId = prev.plexMoviePlaylistId || prev.plexPlaylistId;
+                }
+                if (show.plexTvPlaylistId == null && prev.plexTvPlaylistId) {
+                    show.plexTvPlaylistId = prev.plexTvPlaylistId;
+                }
+                if (show.plexPlaylistId == null && prev.plexPlaylistId) {
+                    show.plexPlaylistId = prev.plexPlaylistId;
+                }
+                if (show.jellyfinPlaylistId == null && prev.jellyfinPlaylistId) {
+                    show.jellyfinPlaylistId = prev.jellyfinPlaylistId;
+                }
+            }
+        }
+        if (id) {
+            await customShowDB.saveShow(id, show);
+        } else {
+            id = await customShowDB.createShow(show);
+        }
+        let saved = await customShowDB.getShow(id);
+        if (!saved) {
+            throw new Error('Failed to load saved custom show');
+        }
+        if (saved.pushToPlex || saved.pushToJellyfin) {
+            let doc = {
+                name: saved.name,
+                pushToPlex: !!saved.pushToPlex,
+                pushToJellyfin: !!saved.pushToJellyfin,
+                plexMovieServerName: saved.plexMovieServerName || saved.plexServerName || null,
+                plexMovieSectionKey:
+                    saved.plexMovieSectionKey != null
+                        ? String(saved.plexMovieSectionKey)
+                        : (saved.plexSectionKey != null ? String(saved.plexSectionKey) : null),
+                plexMovieLibraryTitle: saved.plexMovieLibraryTitle || saved.plexLibraryTitle || null,
+                plexMoviePlaylistId: saved.plexMoviePlaylistId || saved.plexPlaylistId || null,
+                plexTvServerName: saved.plexTvServerName || null,
+                plexTvSectionKey:
+                    saved.plexTvSectionKey != null ? String(saved.plexTvSectionKey) : null,
+                plexTvLibraryTitle: saved.plexTvLibraryTitle || null,
+                plexTvPlaylistId: saved.plexTvPlaylistId || null,
+                plexServerName: saved.plexMovieServerName || saved.plexServerName || null,
+                plexSectionKey:
+                    saved.plexMovieSectionKey != null
+                        ? String(saved.plexMovieSectionKey)
+                        : (saved.plexSectionKey != null ? String(saved.plexSectionKey) : null),
+                plexLibraryTitle: saved.plexMovieLibraryTitle || saved.plexLibraryTitle || null,
+                plexPlaylistId: saved.plexMoviePlaylistId || saved.plexPlaylistId || null,
+                jellyfinPlaylistId: saved.jellyfinPlaylistId || null,
+            };
+            try {
+                await trackedListService.pushPlaylistsFromPrograms(doc, saved.content || []);
+                saved.plexMoviePlaylistId = doc.plexMoviePlaylistId || null;
+                saved.plexTvPlaylistId = doc.plexTvPlaylistId || null;
+                saved.plexPlaylistId = doc.plexMoviePlaylistId || doc.plexPlaylistId || null;
+                saved.jellyfinPlaylistId = doc.jellyfinPlaylistId || null;
+                saved.lastPlaylistPushAt = doc.lastPlaylistPushAt || Date.now();
+                saved.lastPlaylistPushError = doc.lastPlaylistPushError || null;
+            } catch (pushErr) {
+                console.error('custom-show playlist push failed', pushErr);
+                saved.lastPlaylistPushAt = Date.now();
+                saved.lastPlaylistPushError = pushErr.message || String(pushErr);
+            }
+            await customShowDB.saveShow(id, saved);
+            saved = await customShowDB.getShow(id);
+        } else {
+            // Clear push error when disabled; keep last playlist ids for re-enable
+            if (saved.lastPlaylistPushError) {
+                saved.lastPlaylistPushError = null;
+                await customShowDB.saveShow(id, saved);
+            }
+        }
+        return saved;
+    }
+
     router.get('/api/shows', async (req, res) => {
       try {
         let fillers = await customShowDB.getAllShowsInfo();
@@ -1637,20 +1784,20 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         if (typeof(id) === 'undefined') {
           return res.status(400).send("Missing id");
         }
-        await customShowDB.saveShow(id, req.body );
-        return res.status(204).send({});
+        let saved = await saveCustomShowWithPlaylistPush(id, req.body);
+        return res.status(200).send(saved || {});
       } catch(err) {
         console.error(err);
-       res.status(500).send("error");
+        res.status(400).send({ error: err.message || String(err) });
       }
     })
     router.put('/api/show', async (req, res) => {
       try {
-        let uuid = await customShowDB.createShow(req.body );
-        return res.status(201).send({id: uuid});
+        let saved = await saveCustomShowWithPlaylistPush(null, req.body);
+        return res.status(201).send({ id: saved.id, show: saved });
       } catch(err) {
         console.error(err);
-       res.status(500).send("error");
+        res.status(400).send({ error: err.message || String(err) });
       }
     })
     router.delete('/api/show/:id', async (req, res) => {

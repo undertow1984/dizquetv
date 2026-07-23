@@ -1,6 +1,7 @@
 /**
- * Resolve external movie lists (Trakt / Letterboxd / paste) and match titles
+ * Resolve external lists (Trakt / Letterboxd / paste) and match titles
  * against the local Plex + Jellyfin library caches for bulk channel import.
+ * Matches both movies and TV shows (shows expand to playable episodes).
  *
  * Fetch strategies:
  *  - Trakt: official API (requires free client id)
@@ -132,6 +133,8 @@ class ExternalListService {
             .replace(/[\u0300-\u036f]/g, '')
             .replace(/&/g, ' and ')
             .replace(/['’`]/g, '')
+            // IMDB sometimes censors letters with *
+            .replace(/\*/g, '')
             .replace(/[^a-z0-9]+/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
@@ -154,6 +157,40 @@ class ExternalListService {
     }
 
     /**
+     * IMDB list episode titles are usually "Show Name: Episode Title"
+     * (also "Show - Episode" / "Show — Episode").
+     * Multi-colon titles ("Growing Pains: Happy Halloween: Part 1") keep
+     * everything after the first separator as the episode title.
+     */
+    _splitEpisodeListTitle(title) {
+        let t = String(title || '').trim();
+        if (!t) return { showTitle: null, episodeTitle: null };
+        let m = t.match(/^(.+?)\s*[:：]\s*(.+)$/);
+        if (!m) m = t.match(/^(.+?)\s+[–—-]\s+(.+)$/);
+        if (m) {
+            return {
+                showTitle: m[1].trim(),
+                episodeTitle: m[2].trim(),
+            };
+        }
+        return { showTitle: null, episodeTitle: t };
+    }
+
+    /** Extra title variants for softer matching (parts, punctuation). */
+    _titleVariants(s) {
+        let base = String(s || '').trim();
+        if (!base) return [];
+        let out = [base];
+        // drop "Part N" / "Pt. N" suffixes
+        let noPart = base.replace(/\s*[:\-]?\s*part\s*\d+\s*$/i, '').trim();
+        if (noPart && noPart !== base) out.push(noPart);
+        // drop trailing parenthetical
+        let noParen = base.replace(/\s*\([^)]*\)\s*$/, '').trim();
+        if (noParen && noParen !== base) out.push(noParen);
+        return out;
+    }
+
+    /**
      * Parse freeform text: CSV exports or one title per line ("Title (2020)" / "Title, 2020").
      */
     parsePastedText(text) {
@@ -167,6 +204,7 @@ class ExternalListService {
         let items = [];
 
         // Generic Title/Year CSV (optional Const / Title Type columns from exports)
+        // IMDB list export: movies + TV series / mini-series / specials / video / short
         if (/Const/i.test(header) && /Title/i.test(header)) {
             let cols = this._parseCsvLine(header);
             let idx = {};
@@ -174,20 +212,67 @@ class ExternalListService {
                 idx[cols[i].toLowerCase()] = i;
             }
             let titleI = idx['title'] != null ? idx['title'] : -1;
+            let origI = idx['original title'] != null ? idx['original title'] : -1;
             let yearI = idx['year'] != null ? idx['year'] : -1;
             let constI = idx['const'] != null ? idx['const'] : -1;
             let typeI = idx['title type'] != null ? idx['title type'] : -1;
             for (let r = 1; r < lines.length; r++) {
                 let cells = this._parseCsvLine(lines[r]);
                 if (!cells.length) continue;
-                let type = typeI >= 0 ? cells[typeI] : 'movie';
-                if (type && !/movie|tv movie|video|short/i.test(type)) continue;
+                let typeRaw = typeI >= 0 ? String(cells[typeI] || '') : 'movie';
+                let typeKey = typeRaw.replace(/\s+/g, '').toLowerCase();
+                // Skip non-library content only (keep TV episodes — common in IMDB lists)
+                if (
+                    typeKey
+                    && /^(videogame|game|podcastseries|podcastepisode|musicvideo)$/i.test(typeKey)
+                ) {
+                    continue;
+                }
+                let mediaKind = 'movie';
+                if (/^(tvepisode|episode)$/i.test(typeKey) || /^tv\s*episode$/i.test(typeRaw)) {
+                    mediaKind = 'episode';
+                } else if (
+                    /^(tvseries|tvminiseries|tvspecial|tvshort)$/i.test(typeKey)
+                    || /series|mini/i.test(typeRaw)
+                ) {
+                    mediaKind = 'show';
+                } else if (/^(tvmovie)$/i.test(typeKey) || /tv\s*movie/i.test(typeRaw)) {
+                    mediaKind = 'movie';
+                } else if (!typeKey || /^(movie|video|short)$/i.test(typeKey)) {
+                    mediaKind = 'movie';
+                } else if (/show|series/i.test(typeRaw)) {
+                    mediaKind = 'show';
+                }
                 let title = titleI >= 0 ? cells[titleI] : '';
                 if (!title) continue;
+                let originalTitle =
+                    origI >= 0 && cells[origI] && cells[origI] !== title
+                        ? cells[origI]
+                        : null;
+                // IMDB episode titles are often "Show Name: Episode Title"
+                let showTitle = null;
+                let episodeTitle = null;
+                if (mediaKind === 'episode') {
+                    let split = this._splitEpisodeListTitle(title);
+                    showTitle = split.showTitle;
+                    episodeTitle = split.episodeTitle;
+                    if (originalTitle) {
+                        let os = this._splitEpisodeListTitle(originalTitle);
+                        // Prefer original show name when present (e.g. Disneyland vs Magical World of Disney)
+                        if (os.showTitle) {
+                            // keep both via originalTitle field for matcher
+                        }
+                    }
+                }
                 items.push({
                     title: title,
+                    originalTitle: originalTitle,
                     year: yearI >= 0 ? this.parseYear(cells[yearI]) : null,
                     imdbId: constI >= 0 ? cells[constI] : null,
+                    mediaKind: mediaKind,
+                    titleType: typeRaw || null,
+                    showTitle: showTitle,
+                    episodeTitle: episodeTitle,
                     position: items.length + 1,
                 });
             }
@@ -631,32 +716,165 @@ class ExternalListService {
     }
 
     /**
-     * Build searchable index of movies (and optionally shows) from local caches.
+     * Build searchable index of movies + TV shows from local caches.
+     * Episodes are indexed under their show for expansion after a show match.
      */
     buildLibraryIndex() {
-        let programs = []; // { norm, year, program }
+        let programs = []; // { norm, year, kind, program }
         let byImdb = {};
+        // source|server|showRatingKey → playable episodes
+        let episodesByShowKey = {};
+        // source|server|norm(showTitle) → playable episodes (fallback)
+        let episodesByShowNorm = {};
+        // norm keys for single-episode matching (list rows with Title Type = TV Episode)
+        let episodesByTitleNorm = {}; // episode title alone
+        let episodesByShowEpNorm = {}; // "show episode" combined
 
-        const addProgram = (p, serverName, source) => {
-            if (!p || p.type !== 'movie') return;
-            if (!(p.duration > 0)) return;
-            let copy = Object.assign({}, p, {
+        const extractImdb = (p) => {
+            if (!p) return null;
+            if (p.imdbId) return String(p.imdbId).toLowerCase();
+            let fields = [p.guid, p.Guid, p.key, p.ratingKey];
+            for (let i = 0; i < fields.length; i++) {
+                if (!fields[i]) continue;
+                let m = String(fields[i]).match(/tt\d+/i);
+                if (m) return m[0].toLowerCase();
+            }
+            return null;
+        };
+
+        const tagProgram = (p, serverName, source) => {
+            return Object.assign({}, p, {
                 serverKey: p.serverKey || serverName,
                 source: p.source || source,
                 serverType: p.serverType || source,
             });
-            let year = this.parseYear(p.year || (p.date && String(p.date).slice(0, 4)));
-            let norms = [this.normalizeTitle(p.title), this.normalizeTitle(p.originalTitle || '')].filter(Boolean);
-            for (let i = 0; i < norms.length; i++) {
-                programs.push({ norm: norms[i], year: year, program: copy });
+        };
+
+        const pushEpIndex = (map, key, copy, year) => {
+            if (!key) return;
+            if (!map[key]) map[key] = [];
+            map[key].push({ year: year, program: copy });
+        };
+
+        const addTitleEntry = (p, serverName, source, kind) => {
+            if (!p) return;
+            if (kind === 'movie') {
+                if (p.type && p.type !== 'movie') return;
+                if (!(p.duration > 0)) return;
+            } else if (kind === 'show') {
+                if (p.type && p.type !== 'show') return;
+            } else {
+                return;
             }
-            let imdb =
-                p.imdbId
-                || (p.guid && String(p.guid).match(/tt\d+/) && String(p.guid).match(/tt\d+/)[0])
-                || (p.key && String(p.key).match(/tt\d+/) && String(p.key).match(/tt\d+/)[0])
-                || null;
+            let copy = tagProgram(p, serverName, source);
+            let year = this.parseYear(p.year || (p.date && String(p.date).slice(0, 4)));
+            let norms = [
+                this.normalizeTitle(p.title),
+                this.normalizeTitle(p.originalTitle || ''),
+                this.normalizeTitle(p.showTitle || ''),
+            ].filter(Boolean);
+            // de-dupe norms
+            let seenN = {};
+            for (let i = 0; i < norms.length; i++) {
+                if (seenN[norms[i]]) continue;
+                seenN[norms[i]] = true;
+                programs.push({
+                    norm: norms[i],
+                    year: year,
+                    kind: kind,
+                    program: copy,
+                });
+            }
+            let imdb = extractImdb(p);
             if (imdb) {
-                byImdb[String(imdb).toLowerCase()] = copy;
+                // Prefer not overwriting a movie with a show or vice-versa when both exist
+                if (!byImdb[imdb] || byImdb[imdb].type === copy.type) {
+                    byImdb[imdb] = copy;
+                }
+            }
+        };
+
+        const addEpisode = (p, serverName, source) => {
+            if (!p || p.type !== 'episode') return;
+            if (!(p.duration > 0)) return;
+            let copy = tagProgram(p, serverName, source);
+            let year = this.parseYear(p.year || (p.date && String(p.date).slice(0, 4)));
+            let showRk =
+                p.grandparentRatingKey
+                || p.seriesId
+                || p.grandparentKey
+                || null;
+            if (showRk) {
+                let sk =
+                    (copy.source || source) +
+                    '|' +
+                    (copy.serverKey || serverName) +
+                    '|' +
+                    String(showRk);
+                if (!episodesByShowKey[sk]) episodesByShowKey[sk] = [];
+                episodesByShowKey[sk].push(copy);
+            }
+            let showNorm = this.normalizeTitle(p.showTitle || p.grandparentTitle || '');
+            if (showNorm) {
+                let nk =
+                    (copy.source || source) +
+                    '|' +
+                    (copy.serverKey || serverName) +
+                    '|' +
+                    showNorm;
+                if (!episodesByShowNorm[nk]) episodesByShowNorm[nk] = [];
+                episodesByShowNorm[nk].push(copy);
+            }
+            // Title indexes for matching IMDB "Show: Episode" list rows
+            let epNorm = this.normalizeTitle(p.title || '');
+            if (epNorm) {
+                pushEpIndex(episodesByTitleNorm, epNorm, copy, year);
+            }
+            if (showNorm && epNorm) {
+                pushEpIndex(episodesByShowEpNorm, showNorm + ' ' + epNorm, copy, year);
+                // also "show: episode" style as single string
+                pushEpIndex(
+                    episodesByShowEpNorm,
+                    this.normalizeTitle(
+                        (p.showTitle || p.grandparentTitle || '') + ': ' + (p.title || '')
+                    ),
+                    copy,
+                    year
+                );
+            }
+            let imdb = extractImdb(p);
+            if (imdb && !byImdb[imdb]) {
+                byImdb[imdb] = copy;
+            }
+        };
+
+        const walkLibraryBag = (data, serverName, source) => {
+            if (!data) return;
+            // Movies live in items
+            let items = data.items || {};
+            let ikeys = Object.keys(items);
+            for (let i = 0; i < ikeys.length; i++) {
+                let p = items[ikeys[i]];
+                if (!p) continue;
+                if (p.type === 'movie' || (!p.type && data.type === 'movie')) {
+                    addTitleEntry(p, serverName, source, 'movie');
+                } else if (p.type === 'episode') {
+                    addEpisode(p, serverName, source);
+                } else if (p.type === 'show') {
+                    addTitleEntry(p, serverName, source, 'show');
+                }
+            }
+            // TV show shells
+            let shows = data.shows || {};
+            let skeys = Object.keys(shows);
+            for (let i = 0; i < skeys.length; i++) {
+                addTitleEntry(shows[skeys[i]], serverName, source, 'show');
+            }
+            // Episodes
+            let episodes = data.episodes || {};
+            let ekeys = Object.keys(episodes);
+            for (let i = 0; i < ekeys.length; i++) {
+                addEpisode(episodes[ekeys[i]], serverName, source);
             }
         };
 
@@ -678,11 +896,7 @@ class ExternalListService {
                     if (this.plexCache._isHidden && this.plexCache._isHidden(serverName, data.sectionKey)) {
                         continue;
                     }
-                    let items = data.items || {};
-                    let ikeys = Object.keys(items);
-                    for (let i = 0; i < ikeys.length; i++) {
-                        addProgram(items[ikeys[i]], serverName, 'plex');
-                    }
+                    walkLibraryBag(data, serverName, 'plex');
                 }
             }
         };
@@ -705,11 +919,7 @@ class ExternalListService {
                     if (this.jellyfinCache._isHidden && this.jellyfinCache._isHidden(serverName, data.sectionKey)) {
                         continue;
                     }
-                    let items = data.items || {};
-                    let ikeys = Object.keys(items);
-                    for (let i = 0; i < ikeys.length; i++) {
-                        addProgram(items[ikeys[i]], serverName, 'jellyfin');
-                    }
+                    walkLibraryBag(data, serverName, 'jellyfin');
                 }
             }
         };
@@ -725,55 +935,282 @@ class ExternalListService {
             byNorm[e.norm].push(e);
         }
 
-        return { byNorm: byNorm, byImdb: byImdb, count: programs.length };
+        return {
+            byNorm: byNorm,
+            byImdb: byImdb,
+            episodesByShowKey: episodesByShowKey,
+            episodesByShowNorm: episodesByShowNorm,
+            episodesByTitleNorm: episodesByTitleNorm,
+            episodesByShowEpNorm: episodesByShowEpNorm,
+            count: programs.length,
+        };
     }
 
-    matchItems(listItems, index) {
-        index = index || this.buildLibraryIndex();
-        let matched = [];
-        let unmatched = [];
-        let usedKeys = {}; // avoid same movie twice when possible — allow if different list positions need same film? use once
-
-        for (let i = 0; i < (listItems || []).length; i++) {
-            let item = listItems[i];
-            let hit = null;
-
-            if (item.imdbId && index.byImdb[String(item.imdbId).toLowerCase()]) {
-                hit = {
-                    program: index.byImdb[String(item.imdbId).toLowerCase()],
-                    score: 100,
-                    match: 'imdb',
-                };
+    /**
+     * Pick best episode candidate from an index list using optional year.
+     */
+    _bestEpisodeCandidate(cands, year) {
+        if (!cands || !cands.length) return null;
+        let best = null;
+        for (let i = 0; i < cands.length; i++) {
+            let c = cands[i];
+            let score = 80;
+            if (year != null && c.year != null) {
+                if (c.year === year) score += 20;
+                else if (Math.abs(c.year - year) === 1) score += 10;
             }
+            if (!best || score > best.score) {
+                best = { program: c.program, score: score };
+            }
+        }
+        return best && best.score >= 70 ? best : null;
+    }
 
-            if (!hit) {
-                let norm = this.normalizeTitle(item.title);
-                let cands = index.byNorm[norm] || [];
-                if (!cands.length) {
-                    // fuzzy: try without year-like noise already done; try partial
-                    let keys = Object.keys(index.byNorm);
-                    for (let k = 0; k < keys.length && cands.length < 5; k++) {
-                        if (keys[k] === norm) continue;
-                        if (keys[k].indexOf(norm) === 0 || norm.indexOf(keys[k]) === 0) {
-                            if (Math.abs(keys[k].length - norm.length) <= 4) {
-                                cands = cands.concat(index.byNorm[keys[k]]);
+    /**
+     * Match a single list row that is a TV episode (IMDB "Show: Episode Title").
+     */
+    _matchEpisodeItem(item, index) {
+        if (!item || !index) return null;
+        let year = item.year != null ? item.year : null;
+
+        // Build candidate (show, episode) pairs from Title + Original Title
+        let pairs = [];
+        let titlesToSplit = [item.title];
+        if (item.originalTitle) titlesToSplit.push(item.originalTitle);
+        for (let t = 0; t < titlesToSplit.length; t++) {
+            let full = titlesToSplit[t];
+            let fullNorm = this.normalizeTitle(full);
+            if (fullNorm) {
+                let hit = this._bestEpisodeCandidate(
+                    index.episodesByShowEpNorm[fullNorm],
+                    year
+                );
+                if (hit) return Object.assign({ match: 'episode-full' }, hit);
+            }
+            let split = this._splitEpisodeListTitle(full);
+            if (split.showTitle || split.episodeTitle) {
+                pairs.push(split);
+            }
+        }
+        if (item.showTitle || item.episodeTitle) {
+            pairs.push({ showTitle: item.showTitle, episodeTitle: item.episodeTitle });
+        }
+
+        let best = null;
+        for (let p = 0; p < pairs.length; p++) {
+            let showTitle = pairs[p].showTitle;
+            let episodeTitle = pairs[p].episodeTitle;
+            let showVars = this._titleVariants(showTitle || '');
+            let epVars = this._titleVariants(episodeTitle || '');
+            if (!epVars.length && episodeTitle) epVars = [episodeTitle];
+
+            for (let si = 0; si < Math.max(1, showVars.length); si++) {
+                let showNorm = this.normalizeTitle(showVars[si] || showTitle || '');
+                for (let ei = 0; ei < epVars.length; ei++) {
+                    let epNorm = this.normalizeTitle(epVars[ei]);
+                    if (!epNorm) continue;
+
+                    // Combined "show episode"
+                    if (showNorm) {
+                        let hit = this._bestEpisodeCandidate(
+                            index.episodesByShowEpNorm[showNorm + ' ' + epNorm],
+                            year
+                        );
+                        if (hit && (!best || hit.score > best.score)) {
+                            best = Object.assign({ match: 'episode-show-title' }, hit);
+                        }
+                    }
+
+                    // Episode title alone — only if unique in library (avoids
+                    // mapping every "Show: Halloween" to the same episode)
+                    let aloneCands = index.episodesByTitleNorm[epNorm] || [];
+                    if (aloneCands.length === 1) {
+                        let hit2 = this._bestEpisodeCandidate(aloneCands, year);
+                        if (hit2 && hit2.score >= 70 && (!best || hit2.score > best.score)) {
+                            best = Object.assign({ match: 'episode-title-unique' }, hit2);
+                        }
+                    } else if (aloneCands.length > 1 && year != null) {
+                        let hit2 = this._bestEpisodeCandidate(aloneCands, year);
+                        // year must actually disambiguate
+                        if (
+                            hit2
+                            && hit2.score >= 100
+                            && (!best || hit2.score > best.score)
+                        ) {
+                            best = Object.assign({ match: 'episode-title-year' }, hit2);
+                        }
+                    }
+
+                    // Scan show's episodes
+                    if (showNorm && index.episodesByShowNorm) {
+                        let keys = Object.keys(index.episodesByShowNorm);
+                        for (let k = 0; k < keys.length; k++) {
+                            let parts = keys[k].split('|');
+                            if (parts[parts.length - 1] !== showNorm) continue;
+                            let eps = index.episodesByShowNorm[keys[k]] || [];
+                            for (let e = 0; e < eps.length; e++) {
+                                let ep = eps[e];
+                                let n = this.normalizeTitle(ep.title || '');
+                                if (!n) continue;
+                                let score = 0;
+                                if (n === epNorm) score = 90;
+                                else if (n.indexOf(epNorm) >= 0 || epNorm.indexOf(n) >= 0) {
+                                    if (Math.abs(n.length - epNorm.length) <= 8) score = 78;
+                                }
+                                if (score <= 0) continue;
+                                let ey = this.parseYear(
+                                    ep.year || (ep.date && String(ep.date).slice(0, 4))
+                                );
+                                if (year != null && ey != null) {
+                                    if (ey === year) score += 15;
+                                    else if (Math.abs(ey - year) === 1) score += 5;
+                                }
+                                if (!best || score > best.score) {
+                                    best = {
+                                        program: ep,
+                                        score: score,
+                                        match: 'episode-in-show',
+                                    };
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if (best && best.score >= 70) return best;
+        return null;
+    }
+
+    /**
+     * Expand a matched show shell to playable episodes from the same server/library index.
+     */
+    _episodesForShow(showProgram, index) {
+        if (!showProgram || !index) return [];
+        let source = showProgram.source || showProgram.serverType || '';
+        let server = showProgram.serverKey || showProgram.serverName || '';
+        let rk = showProgram.ratingKey || showProgram.jellyfinId || showProgram.seriesId || null;
+        let eps = [];
+        if (rk) {
+            let sk = source + '|' + server + '|' + String(rk);
+            eps = index.episodesByShowKey[sk] || [];
+        }
+        if (!eps.length) {
+            let norm = this.normalizeTitle(showProgram.title || showProgram.showTitle || '');
+            if (norm) {
+                let nk = source + '|' + server + '|' + norm;
+                eps = index.episodesByShowNorm[nk] || [];
+            }
+        }
+        // Stable season/episode order
+        eps = eps.slice().sort((a, b) => {
+            let sa = a.season != null ? Number(a.season) : 0;
+            let sb = b.season != null ? Number(b.season) : 0;
+            if (sa !== sb) return sa - sb;
+            let ea = a.episode != null ? Number(a.episode) : 0;
+            let eb = b.episode != null ? Number(b.episode) : 0;
+            return ea - eb;
+        });
+        return eps;
+    }
+
+    matchItems(listItems, index) {
+        index = index || this.buildLibraryIndex();
+        let matched = []; // playable programs (movies + expanded episodes)
+        let unmatched = [];
+        let matchedListCount = 0;
+
+        for (let i = 0; i < (listItems || []).length; i++) {
+            let item = listItems[i];
+            let hit = null;
+            let preferKind = item.mediaKind || null; // 'movie' | 'show' | 'episode' | null
+
+            // --- IMDB id (works for movies, shows, and episodes when guids exist) ---
+            if (item.imdbId && index.byImdb[String(item.imdbId).toLowerCase()]) {
+                let prog = index.byImdb[String(item.imdbId).toLowerCase()];
+                let kind =
+                    prog.type === 'show'
+                        ? 'show'
+                        : prog.type === 'episode'
+                          ? 'episode'
+                          : 'movie';
+                hit = {
+                    program: prog,
+                    score: 100,
+                    match: 'imdb',
+                    kind: kind,
+                };
+            }
+
+            // --- TV Episode list rows: match a single library episode ---
+            if (!hit && (preferKind === 'episode' || /:/.test(item.title || ''))) {
+                let epHit = this._matchEpisodeItem(item, index);
+                if (epHit && epHit.program) {
+                    hit = {
+                        program: epHit.program,
+                        score: epHit.score,
+                        match: epHit.match || 'episode',
+                        kind: 'episode',
+                    };
+                }
+            }
+
+            // --- Movie / show title match ---
+            if (!hit && preferKind !== 'episode') {
+                let titleCandidates = [item.title];
+                if (item.originalTitle) titleCandidates.push(item.originalTitle);
                 let year = item.year != null ? item.year : null;
                 let best = null;
-                for (let c = 0; c < cands.length; c++) {
-                    let cand = cands[c];
-                    let score = 50;
-                    if (cand.norm === norm) score = 80;
-                    if (year != null && cand.year != null) {
-                        if (cand.year === year) score += 20;
-                        else if (Math.abs(cand.year - year) === 1) score += 10;
-                        else score -= 30;
-                    }
-                    if (!best || score > best.score) {
-                        best = { program: cand.program, score: score, match: 'title' };
+                for (let ti = 0; ti < titleCandidates.length; ti++) {
+                    let normsTry = this._titleVariants(titleCandidates[ti]).map((v) =>
+                        this.normalizeTitle(v)
+                    );
+                    // also plain normalize
+                    normsTry.unshift(this.normalizeTitle(titleCandidates[ti]));
+                    let seenN = {};
+                    for (let ni = 0; ni < normsTry.length; ni++) {
+                        let norm = normsTry[ni];
+                        if (!norm || seenN[norm]) continue;
+                        seenN[norm] = true;
+                        let cands = index.byNorm[norm] || [];
+                        if (!cands.length) {
+                            let keys = Object.keys(index.byNorm);
+                            for (let k = 0; k < keys.length && cands.length < 8; k++) {
+                                if (keys[k] === norm) continue;
+                                if (
+                                    keys[k].indexOf(norm) === 0
+                                    || norm.indexOf(keys[k]) === 0
+                                ) {
+                                    if (Math.abs(keys[k].length - norm.length) <= 4) {
+                                        cands = cands.concat(index.byNorm[keys[k]]);
+                                    }
+                                }
+                            }
+                        }
+                        for (let c = 0; c < cands.length; c++) {
+                            let cand = cands[c];
+                            let score = 50;
+                            if (cand.norm === norm) score = 80;
+                            if (preferKind && cand.kind === preferKind) score += 15;
+                            else if (preferKind && cand.kind && cand.kind !== preferKind) {
+                                score -= 10;
+                            }
+                            if (year != null && cand.year != null) {
+                                if (cand.year === year) score += 20;
+                                else if (Math.abs(cand.year - year) === 1) score += 10;
+                                else if (cand.norm === norm) score += 0;
+                                else score -= 30;
+                            }
+                            if (!best || score > best.score) {
+                                best = {
+                                    program: cand.program,
+                                    score: score,
+                                    match: 'title',
+                                    kind: cand.kind,
+                                };
+                            }
+                        }
                     }
                 }
                 if (best && best.score >= 70) {
@@ -781,24 +1218,77 @@ class ExternalListService {
                 }
             }
 
+            // Last chance for ambiguous rows that look like "Show: Episode"
+            if (!hit) {
+                let epHit = this._matchEpisodeItem(item, index);
+                if (epHit && epHit.program) {
+                    hit = {
+                        program: epHit.program,
+                        score: epHit.score,
+                        match: epHit.match || 'episode',
+                        kind: 'episode',
+                    };
+                }
+            }
+
             if (hit && hit.program) {
-                let pk =
-                    (hit.program.source || '') +
-                    '|' +
-                    (hit.program.serverKey || '') +
-                    '|' +
-                    (hit.program.ratingKey || hit.program.key || '');
-                // Allow duplicates from list if needed; still track
-                matched.push({
-                    title: item.title,
-                    year: item.year,
-                    imdbId: item.imdbId || null,
-                    position: item.position || i + 1,
-                    score: hit.score,
-                    match: hit.match,
-                    program: this._programForChannel(hit.program),
-                });
-                usedKeys[pk] = true;
+                let isShow = hit.program.type === 'show' || hit.kind === 'show';
+                let isEpisode = hit.program.type === 'episode' || hit.kind === 'episode';
+                if (isEpisode) {
+                    matchedListCount++;
+                    matched.push({
+                        title: item.title,
+                        year: item.year,
+                        imdbId: item.imdbId || null,
+                        position: item.position || i + 1,
+                        score: hit.score,
+                        match: hit.match,
+                        program: this._programForChannel(hit.program),
+                    });
+                } else if (isShow) {
+                    let eps = this._episodesForShow(hit.program, index);
+                    if (eps.length) {
+                        matchedListCount++;
+                        for (let e = 0; e < eps.length; e++) {
+                            matched.push({
+                                title: item.title,
+                                year: item.year,
+                                imdbId: item.imdbId || null,
+                                position: item.position || i + 1,
+                                score: hit.score,
+                                match: (hit.match || 'title') + '-episodes',
+                                program: this._programForChannel(eps[e]),
+                            });
+                        }
+                    } else {
+                        // Show shell found but no playable episodes in cache
+                        unmatched.push({
+                            title: item.title,
+                            year: item.year,
+                            imdbId: item.imdbId || null,
+                            position: item.position || i + 1,
+                            reason: 'Show found but no episodes in library cache (sync TV libraries?)',
+                        });
+                    }
+                } else if (hit.program.type === 'movie' || hit.program.duration > 0) {
+                    matchedListCount++;
+                    matched.push({
+                        title: item.title,
+                        year: item.year,
+                        imdbId: item.imdbId || null,
+                        position: item.position || i + 1,
+                        score: hit.score,
+                        match: hit.match,
+                        program: this._programForChannel(hit.program),
+                    });
+                } else {
+                    unmatched.push({
+                        title: item.title,
+                        year: item.year,
+                        imdbId: item.imdbId || null,
+                        position: item.position || i + 1,
+                    });
+                }
             } else {
                 unmatched.push({
                     title: item.title,
@@ -812,7 +1302,9 @@ class ExternalListService {
         return {
             matched: matched,
             unmatched: unmatched,
+            matchedListCount: matchedListCount,
             libraryMovieCount: index.count,
+            libraryCount: index.count,
         };
     }
 
@@ -870,15 +1362,23 @@ class ExternalListService {
         let index = this.buildLibraryIndex();
         let match = this.matchItems(list.items, index);
 
+        // matchedCount = list titles found in library (movies or shows).
+        // matched[] = playable programs (movies + all episodes for matched shows).
+        let listMatched =
+            typeof match.matchedListCount === 'number'
+                ? match.matchedListCount
+                : match.matched.length;
         return {
             ok: true,
             provider: list.provider || this.detectProvider(url, text) || 'unknown',
             listName: list.listName || 'External list',
             listUrl: list.listUrl || url || null,
             itemCount: list.items.length,
-            matchedCount: match.matched.length,
+            matchedCount: listMatched,
+            programCount: match.matched.length,
             unmatchedCount: match.unmatched.length,
             libraryMovieCount: match.libraryMovieCount,
+            libraryCount: match.libraryCount || match.libraryMovieCount,
             matched: match.matched,
             unmatched: match.unmatched.slice(0, 200),
             unmatchedTruncated: match.unmatched.length > 200,
