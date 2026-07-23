@@ -123,8 +123,45 @@ class Plex {
                 reject("No Plex token provided. Please use the SignIn method or provide a X-Plex-Token in the Plex constructor.")
             else
                 request(req, (err, res) => {
-                    if (err || res.statusCode !== 200)
-                        reject(`Plex 'Post' request failed. URL: ${this.URL}${path}`)
+                    if (err || res.statusCode < 200 || res.statusCode >= 300)
+                        reject(`Plex 'Post' request failed. URL: ${this.URL}${path} (${res && res.statusCode})`)
+                    else
+                        resolve(res.body)
+                })
+        })
+    }
+
+    /**
+     * POST and parse JSON MediaContainer when possible (playlist create, etc.).
+     */
+    async PostJson(path, query = {}, optionalHeaders = {}) {
+        let body = await this.Post(path, query, optionalHeaders);
+        if (!body) return null;
+        try {
+            let j = typeof body === 'string' ? JSON.parse(body) : body;
+            return j.MediaContainer || j;
+        } catch (e) {
+            return body;
+        }
+    }
+
+    async Delete(path, query = {}, optionalHeaders = {}) {
+        var req = {
+            method: 'delete',
+            url: `${this.URL}${path}`,
+            headers: this._headers,
+            qs: query,
+            jar: false
+        }
+        Object.assign(req, optionalHeaders)
+        req.headers['X-Plex-Token'] = this._accessToken
+        return new Promise((resolve, reject) => {
+            if (this._accessToken === '')
+                reject("No Plex token provided.")
+            else
+                request(req, (err, res) => {
+                    if (err || (res.statusCode < 200 || res.statusCode >= 300))
+                        reject(`Plex 'Delete' request failed. URL: ${this.URL}${path}`)
                     else
                         resolve(res.body)
                 })

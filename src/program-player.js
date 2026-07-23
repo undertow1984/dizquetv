@@ -19,10 +19,38 @@
  **/
 
 let OfflinePlayer = require('./offline-player');
-let PlexPlayer = require('./plex-player');;
+let PlexPlayer = require('./plex-player');
+let JellyfinPlayer = require('./jellyfin-player');
 const EventEmitter = require('events');
 const helperFuncs = require('./helperFuncs');
 
+/**
+ * True when this program should play via JellyfinPlayer.
+ * Prefer explicit source flags; also detect by jellyfin-servers registry
+ * and stream path markers so older channel JSON still works.
+ */
+function isJellyfinProgram(program, db) {
+    if (!program) return false;
+    if (program.source === 'jellyfin' || program.serverType === 'jellyfin') {
+        return true;
+    }
+    if (program.jellyfinId) {
+        return true;
+    }
+    if (typeof program.plexFile === 'string' && program.plexFile.indexOf('/Videos/') === 0) {
+        return true;
+    }
+    // serverKey registered as a Jellyfin server (not Plex)
+    if (program.serverKey && db && db['jellyfin-servers']) {
+        try {
+            let rows = db['jellyfin-servers'].find({ name: program.serverKey });
+            if (rows && rows.length > 0) {
+                return true;
+            }
+        } catch (e) { /* ignore */ }
+    }
+    return false;
+}
 
 class ProgramPlayer {
 
@@ -88,9 +116,15 @@ class ProgramPlayer {
             console.log("About to play offline stream");
             /* offline */
             this.delegate = new OfflinePlayer(false, context);
+        } else if (isJellyfinProgram(program, context.db)) {
+            console.log("About to play jellyfin stream");
+            // Ensure identity fields survive even if lineup construction omitted them
+            if (!program.source) program.source = 'jellyfin';
+            if (!program.serverType) program.serverType = 'jellyfin';
+            this.delegate = new JellyfinPlayer(context);
         } else {
             console.log("About to play plex stream");
-            /* plex */
+            /* plex (default) */
             this.delegate = new PlexPlayer(context);
         }
         this.context.watermark = helperFuncs.getWatermark( context.ffmpegSettings, context.channel, context.lineupItem.type);

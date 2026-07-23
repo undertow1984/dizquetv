@@ -3,6 +3,9 @@ module.exports = {
     createLineup: createLineup,
     getWatermark: getWatermark,
     generateChannelContext: generateChannelContext,
+    resolveOverlayUrlForFfmpeg: resolveOverlayUrlForFfmpeg,
+    isStockOrEmptyIcon: isStockOrEmptyIcon,
+    isGeneratedLogoPath: isGeneratedLogoPath,
 }
 
 let channelCache = require('./channel-cache');
@@ -25,6 +28,46 @@ const CHANNEL_CONTEXT_KEYS = [
 ];
 
 module.exports.random = random;
+
+/**
+ * Copy fields needed to resolve and play a program from any media source.
+ * Without these, lineup items default to Plex and lose Jellyfin identity.
+ */
+function playbackIdentityFrom(program) {
+    if (!program || typeof program !== 'object') {
+        return {};
+    }
+    let out = {};
+    const KEYS = [
+        'source',
+        'serverType',
+        'serverKey',
+        'jellyfinId',
+        'mediaSourceId',
+        'key',
+        'ratingKey',
+        'plexFile',
+        'file',
+        'title',
+        'showTitle',
+        'type',
+        'icon',
+    ];
+    for (let i = 0; i < KEYS.length; i++) {
+        let k = KEYS[i];
+        if (typeof program[k] !== 'undefined') {
+            out[k] = program[k];
+        }
+    }
+    // Infer jellyfin source when id/path markers exist but source was stripped
+    if (!out.source && !out.serverType) {
+        if (out.jellyfinId || (typeof out.plexFile === 'string' && out.plexFile.indexOf('/Videos/') === 0)) {
+            out.source = 'jellyfin';
+            out.serverType = 'jellyfin';
+        }
+    }
+    return out;
+}
 
 function getCurrentProgramAndTimeElapsed(date, channel) {
     let channelStartTime = (new Date(channel.startTime)).getTime();
@@ -124,7 +167,8 @@ function createLineup(programPlayTime, obj, channel, fillers, isFirst) {
                 let more = Math.max(0, filler.duration - fillerstart - 15000 - SLACK);
                 fillerstart +=  random.integer(0, more);
             }
-            lineup.push({   // just add the video, starting at 0, playing the entire duration
+            lineup.push(Object.assign(playbackIdentityFrom(filler), {
+                // just add the video, starting at 0, playing the entire duration
                 type: 'commercial',
                 title: filler.title,
                 key: filler.key,
@@ -136,8 +180,8 @@ function createLineup(programPlayTime, obj, channel, fillers, isFirst) {
                 duration: filler.duration,
                 fillerId: filler.fillerId,
                 beginningOffset: beginningOffset,
-                serverKey: filler.serverKey
-            });
+                serverKey: filler.serverKey,
+            }));
             return lineup;
         }
         // pick the offline screen
@@ -161,7 +205,7 @@ function createLineup(programPlayTime, obj, channel, fillers, isFirst) {
     }
     beginningOffset = Math.max(0, originalTimeElapsed - timeElapsed);
 
-    return [ {
+    return [ Object.assign(playbackIdentityFrom(activeProgram), {
                         type: 'program',
                         title: activeProgram.title,
                         key: activeProgram.key,
@@ -172,8 +216,8 @@ function createLineup(programPlayTime, obj, channel, fillers, isFirst) {
                         streamDuration: activeProgram.duration - timeElapsed,
                         beginningOffset: beginningOffset,
                         duration: activeProgram.duration,
-                        serverKey: activeProgram.serverKey
-    } ];
+                        serverKey: activeProgram.serverKey,
+    }) ];
 }
 
 function weighedPick(a, total) {
@@ -303,9 +347,119 @@ function norm_s(x) {
 }
 
 
+function isStockOrEmptyIcon(icon) {
+    if (typeof(icon) === 'undefined' || icon === null || String(icon).trim() === '') {
+        return true;
+    }
+    let s = String(icon).trim();
+    return (
+        /\/images\/dizquetv\.png/i.test(s)
+        || /images\/dizquetv\.png/i.test(s)
+    );
+}
+
+function isGeneratedLogoPath(icon) {
+    if (!icon) {
+        return false;
+    }
+    let s = String(icon).split('?')[0];
+    return (
+        s.indexOf('/cache/channel-logos/') === 0
+        || s.indexOf('/images/channel-logos/') === 0
+        || /\/cache\/channel-logos\//i.test(s)
+        || /\/images\/channel-logos\//i.test(s)
+    );
+}
+
+/**
+ * Turn a watermark icon value into something FFmpeg can open.
+ * Prefers absolute filesystem paths for generated logos (Plex + Jellyfin).
+ */
+function resolveOverlayUrlForFfmpeg(icon) {
+    if (icon == null) {
+        return null;
+    }
+    let overlayUrl = String(icon).trim();
+    if (!overlayUrl) {
+        return null;
+    }
+    let pathOnly = overlayUrl.split('?')[0];
+    const fsMod = require('fs');
+    const pathMod = require('path');
+    const dbPaths = require('./database-paths');
+
+    // Already a usable local file
+    if (!/^https?:\/\//i.test(pathOnly) && fsMod.existsSync(pathOnly)) {
+        return pathOnly.replace(/\\/g, '/');
+    }
+    if (/^file:\/\//i.test(pathOnly)) {
+        let local = pathOnly.replace(/^file:\/\//i, '');
+        if (fsMod.existsSync(local)) {
+            return local.replace(/\\/g, '/');
+        }
+    }
+
+    // Loopback HTTP that points at our own static assets → local path
+    let hostPath = null;
+    if (/^https?:\/\//i.test(pathOnly)) {
+        try {
+            let u = new URL(pathOnly);
+            let host = (u.hostname || '').toLowerCase();
+            if (
+                host === '127.0.0.1'
+                || host === 'localhost'
+                || host === '0.0.0.0'
+                || host === '::1'
+            ) {
+                hostPath = u.pathname || '';
+            }
+        } catch (e) { /* keep as remote URL */ }
+    } else if (pathOnly.charAt(0) === '/') {
+        hostPath = pathOnly;
+    }
+
+    if (hostPath) {
+        // Generated channel logos (new + legacy URL)
+        if (
+            hostPath.indexOf('/cache/channel-logos/') === 0
+            || hostPath.indexOf('/images/channel-logos/') === 0
+        ) {
+            let abs = dbPaths.resolveLocalLogoPath(hostPath);
+            if (abs) {
+                return abs.replace(/\\/g, '/');
+            }
+        }
+        // Other files under DATABASE (e.g. /images/uploads/…)
+        try {
+            let rel = hostPath.replace(/^\//, '').split('/').join(pathMod.sep);
+            let abs = pathMod.join(dbPaths.dbRoot(), rel);
+            if (fsMod.existsSync(abs)) {
+                return abs.replace(/\\/g, '/');
+            }
+        } catch (e) { /* fall through */ }
+        // Still serve via HTTP for remote-capable pipelines (Plex/shared FFMPEG)
+        if (!/^https?:\/\//i.test(overlayUrl)) {
+            return 'http://127.0.0.1:' + (process.env.PORT || 8000) + hostPath;
+        }
+        return pathOnly;
+    }
+
+    // External HTTP(S) — leave for players that support remote overlays
+    return overlayUrl;
+}
+
 // any channel thing used here should be added to channel context
-function getWatermark(  ffmpegSettings, channel, type) {
-    if (! ffmpegSettings.enableFFMPEGTranscoding || ffmpegSettings.disableChannelOverlay ) {
+// options.forceOverlay: true for players that always run FFmpeg (e.g. Jellyfin simple pipeline)
+// even when global "Enable FFMPEG Transcoding" is off.
+function getWatermark(  ffmpegSettings, channel, type, options) {
+    options = options || {};
+    if (!ffmpegSettings || ffmpegSettings.disableChannelOverlay) {
+        return null;
+    }
+    if (
+        !ffmpegSettings.enableFFMPEGTranscoding
+        && options.forceOverlay !== true
+    ) {
         return null;
     }
     let d = channel.disableFillerOverlay;
@@ -329,16 +483,22 @@ function getWatermark(  ffmpegSettings, channel, type) {
     if ( (typeof(icon) === 'undefined') || (icon === '') ) {
         icon = channel.icon;
     }
-    // Dynamic channel logo from PSD template when no custom image path is set.
-    // Treat common defaults (empty, missing, or stock dizquetv icon) as "no image".
-    let iconEmpty = (
-        typeof(icon) === 'undefined'
-        || icon === null
-        || String(icon).trim() === ''
-        || /\/images\/dizquetv\.png$/i.test(String(icon))
-        || /images\/dizquetv\.png$/i.test(String(icon))
-    );
-    if (iconEmpty && ffmpegSettings && ffmpegSettings.enableDynamicChannelLogos === true) {
+    // Dynamic channel logos (Plex-Template PSDs) apply to every channel — Plex or Jellyfin.
+    // Treat empty / stock / missing generated logo as needing (re)generation.
+    let iconEmpty = isStockOrEmptyIcon(icon);
+    let needDynamic = iconEmpty;
+    if (!needDynamic && isGeneratedLogoPath(icon) && ffmpegSettings.enableDynamicChannelLogos === true) {
+        try {
+            const dbPaths = require('./database-paths');
+            let abs = dbPaths.resolveLocalLogoPath(String(icon).split('?')[0]);
+            if (!abs) {
+                needDynamic = true;
+            }
+        } catch (e) {
+            needDynamic = true;
+        }
+    }
+    if (needDynamic && ffmpegSettings.enableDynamicChannelLogos === true) {
         try {
             const logoGen = require('./channel-logo-generator');
             let dyn = logoGen.resolveDynamicLogoUrl(ffmpegSettings, channel);
@@ -348,7 +508,7 @@ function getWatermark(  ffmpegSettings, channel, type) {
                     `dizqueTV watermark: PSD dynamic logo for ch${channel.number} ` +
                     `"${channel.name}" → ${dyn}`
                 );
-            } else {
+            } else if (iconEmpty) {
                 console.error(
                     `dizqueTV watermark: dynamic logo generation returned nothing for ch${channel.number}`
                 );
@@ -360,31 +520,9 @@ function getWatermark(  ffmpegSettings, channel, type) {
     if ( (typeof(icon) === 'undefined') || (icon === '') || icon === null ) {
         return null;
     }
-    // FFmpeg needs an absolute URL or filesystem path (not a bare /cache/... path)
-    let overlayUrl = String(icon).trim();
-    // Drop cache-busting query for local file resolution
-    let pathOnly = overlayUrl.split('?')[0];
-    if (/^https?:\/\//i.test(overlayUrl)) {
-        // keep full URL (query ok for HTTP)
-    } else if (pathOnly.indexOf('/cache/channel-logos/') === 0) {
-        // Prefer absolute file path for generated logos (reliable for FFmpeg)
-        try {
-            const pathMod = require('path');
-            const fsMod = require('fs');
-            let abs = pathMod.join(
-                process.env.DATABASE || '',
-                pathOnly.replace(/^\//, '').split('/').join(pathMod.sep)
-            );
-            if (fsMod.existsSync(abs)) {
-                overlayUrl = abs.replace(/\\/g, '/');
-            } else {
-                overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
-            }
-        } catch (e) {
-            overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
-        }
-    } else if (pathOnly.charAt(0) === '/') {
-        overlayUrl = 'http://127.0.0.1:' + (process.env.PORT || 8000) + pathOnly;
+    let overlayUrl = resolveOverlayUrlForFfmpeg(icon);
+    if (!overlayUrl) {
+        return null;
     }
     let result = {
         url: overlayUrl,

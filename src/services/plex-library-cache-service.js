@@ -2,7 +2,7 @@
  * Local Plex library cache + full/incremental sync.
  *
  * Persists movies, shows, episodes, tracks, collections, and playlists under
- * DATABASE/plex-cache. All UI/API reads are served from an in-memory map that is
+ * DATABASE/cache/plex-cache. All UI/API reads are served from an in-memory map that is
  * loaded once at startup and rewritten whenever a sync or delete completes.
  *
  * Full sync: download everything for a library (or all enabled libraries).
@@ -17,7 +17,8 @@ const PAGE_SIZE = 200;
 class PlexLibraryCacheService {
     constructor(db) {
         this.db = db;
-        this.root = path.join(process.env.DATABASE || './.dizquetv', 'plex-cache');
+        const dbPaths = require('../database-paths');
+        this.root = dbPaths.plexCacheDir();
         this._ensureDir(this.root);
         this._syncing = {}; // key -> true while sync in progress
         this._autoTimer = null;
@@ -190,6 +191,13 @@ class PlexLibraryCacheService {
         if (!rows || rows.length === 0) {
             let doc = {
                 disabledLibraries: [],
+                /** Libraries marked "Contains filler" — only these appear in Add Filler */
+                fillerLibraries: [],
+                /**
+                 * Libraries with "Hide content" — excluded from programming UI everywhere,
+                 * except Add Filler when also marked as filler.
+                 */
+                hiddenLibraries: [],
                 autoSyncHours: 0,
                 lastGlobalSyncAt: null,
                 librarySync: {},
@@ -200,6 +208,12 @@ class PlexLibraryCacheService {
         let doc = rows[0];
         if (!Array.isArray(doc.disabledLibraries)) {
             doc.disabledLibraries = [];
+        }
+        if (!Array.isArray(doc.fillerLibraries)) {
+            doc.fillerLibraries = [];
+        }
+        if (!Array.isArray(doc.hiddenLibraries)) {
+            doc.hiddenLibraries = [];
         }
         if (typeof doc.autoSyncHours !== 'number' || isNaN(doc.autoSyncHours)) {
             doc.autoSyncHours = 0;
@@ -223,6 +237,7 @@ class PlexLibraryCacheService {
             }
         } catch (e) { /* ignore */ }
         this.db['plex-library-settings'].update({ _id: doc._id }, doc);
+        this._invalidateHiddenIndex();
         // Only reschedule auto-sync when the interval itself changes
         if (options.forceReschedule || prevHours !== doc.autoSyncHours) {
             this._bootAutoSchedule();
@@ -307,6 +322,116 @@ class PlexLibraryCacheService {
         return false;
     }
 
+    _isHidden(serverName, sectionKey) {
+        let list = this.getSettingsDoc().hiddenLibraries || [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].serverName === serverName && String(list[i].sectionKey) === String(sectionKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    _isFiller(serverName, sectionKey) {
+        let list = this.getSettingsDoc().fillerLibraries || [];
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].serverName === serverName && String(list[i].sectionKey) === String(sectionKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Index of item ids + section keys for libraries marked "Hide content".
+     * Used to filter global playlists/collections that belong to those libraries.
+     */
+    _getHiddenContentIndex(serverName) {
+        let name = String(serverName || '');
+        if (!this._hiddenIndexCache) this._hiddenIndexCache = {};
+        let cached = this._hiddenIndexCache[name];
+        if (cached && cached.at && (Date.now() - cached.at) < 5000) {
+            return cached;
+        }
+        let sectionKeys = {};
+        let titles = {};
+        let itemIds = {};
+        let hiddenList = this.getSettingsDoc().hiddenLibraries || [];
+        for (let i = 0; i < hiddenList.length; i++) {
+            let h = hiddenList[i];
+            if (!h || h.serverName !== serverName) continue;
+            let sk = String(h.sectionKey);
+            sectionKeys[sk] = true;
+            if (h.title) titles[String(h.title).toLowerCase()] = true;
+            let data = this.getCachedLibraryData(serverName, sk);
+            if (!data) continue;
+            if (data.title) titles[String(data.title).toLowerCase()] = true;
+            let maps = [data.items, data.shows, data.seasons, data.episodes, data.tracks];
+            for (let m = 0; m < maps.length; m++) {
+                let map = maps[m];
+                if (!map) continue;
+                let keys = Object.keys(map);
+                for (let k = 0; k < keys.length; k++) {
+                    let it = map[keys[k]];
+                    let id = it && (it.ratingKey != null ? it.ratingKey : keys[k]);
+                    if (id != null && id !== '') itemIds[String(id)] = true;
+                }
+            }
+        }
+        let idx = { sectionKeys: sectionKeys, titles: titles, itemIds: itemIds, at: Date.now() };
+        this._hiddenIndexCache[name] = idx;
+        return idx;
+    }
+
+    _invalidateHiddenIndex(serverName) {
+        if (!this._hiddenIndexCache) return;
+        if (serverName) delete this._hiddenIndexCache[String(serverName)];
+        else this._hiddenIndexCache = {};
+    }
+
+    /**
+     * True when a playlist/collection should be omitted because it belongs to
+     * a "Hide content" library (by section key, library title, or children).
+     */
+    _isListSourceHidden(serverName, item) {
+        if (!item) return false;
+        let idx = this._getHiddenContentIndex(serverName);
+        if (!idx || !Object.keys(idx.sectionKeys).length) return false;
+
+        let sk =
+            item.sectionKey != null ? String(item.sectionKey)
+            : (item.librarySectionKey != null ? String(item.librarySectionKey)
+            : (item.librarySectionID != null ? String(item.librarySectionID) : null));
+        if (sk != null && idx.sectionKeys[sk]) return true;
+
+        let libTitle = item.libraryTitle || item.librarySectionTitle || '';
+        if (libTitle && idx.titles[String(libTitle).toLowerCase()]) return true;
+
+        let children = Array.isArray(item.children) ? item.children : null;
+        if (!children || !children.length) return false;
+
+        let inHidden = 0;
+        let inOther = 0;
+        for (let c = 0; c < children.length; c++) {
+            let ch = children[c];
+            if (!ch) continue;
+            let csk =
+                ch.librarySectionID != null ? String(ch.librarySectionID)
+                : (ch.sectionKey != null ? String(ch.sectionKey)
+                : (ch.librarySectionKey != null ? String(ch.librarySectionKey) : null));
+            if (csk != null) {
+                if (idx.sectionKeys[csk]) inHidden++;
+                else inOther++;
+                continue;
+            }
+            let id = ch.ratingKey != null ? String(ch.ratingKey) : '';
+            if (id && idx.itemIds[id]) inHidden++;
+            else if (id) inOther++;
+        }
+        // Hide when every mappable child is from a hidden library
+        return inHidden > 0 && inOther === 0;
+    }
+
     /**
      * Paginated GET of a Plex path, collecting all Metadata entries.
      * @param {function} [onPage] optional (fetched, total, label) => void
@@ -315,6 +440,8 @@ class PlexLibraryCacheService {
         let all = [];
         let start = 0;
         let total = Infinity;
+        // Request guids + full metadata so Genre/Director/Role/Media/etc. are present when Plex provides them
+        let enrich = 'includeGuids=1&includeMarkers=0&includePreferences=0';
         while (start < total) {
             let sep = basePath.indexOf('?') >= 0 ? '&' : '?';
             let url =
@@ -323,7 +450,9 @@ class PlexLibraryCacheService {
                 'X-Plex-Container-Start=' +
                 start +
                 '&X-Plex-Container-Size=' +
-                PAGE_SIZE;
+                PAGE_SIZE +
+                '&' +
+                enrich;
             let res = await client.Get(url);
             let page = res.Metadata || [];
             let totalSize = typeof res.totalSize !== 'undefined' ? parseInt(res.totalSize, 10) : null;
@@ -365,7 +494,118 @@ class PlexLibraryCacheService {
     }
 
     /**
+     * Extract string tags from Plex metadata arrays (Genre, Director, Role, …).
+     * @param {any} arr
+     * @returns {string[]}
+     */
+    _plexTags(arr) {
+        if (!arr) {
+            return [];
+        }
+        if (!Array.isArray(arr)) {
+            if (typeof arr === 'string') {
+                return arr ? [arr] : [];
+            }
+            let single = arr.tag || arr.Tag || arr.title || arr.name;
+            return single ? [String(single)] : [];
+        }
+        let out = [];
+        for (let i = 0; i < arr.length; i++) {
+            let x = arr[i];
+            if (x == null) continue;
+            if (typeof x === 'string') {
+                out.push(x);
+            } else {
+                let t = x.tag || x.Tag || x.title || x.name || x.displayTitle;
+                if (t) out.push(String(t));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Compact filter-related fields for catalog list rows (no large payloads).
+     */
+    _filterFieldsFromProgram(p) {
+        if (!p) return {};
+        return {
+            year: p.year != null ? p.year : null,
+            date: p.date || null,
+            genres: Array.isArray(p.genres) ? p.genres.slice() : [],
+            contentRating: p.contentRating || p.rating || null,
+            rating: p.rating || p.contentRating || null,
+            studio: p.studio || null,
+            network: p.network || null,
+            country: p.country || null,
+            countries: Array.isArray(p.countries) ? p.countries.slice() : [],
+            actors: Array.isArray(p.actors) ? p.actors.slice(0, 40) : [],
+            directors: Array.isArray(p.directors) ? p.directors.slice(0, 20) : [],
+            writers: Array.isArray(p.writers) ? p.writers.slice(0, 20) : [],
+            labels: Array.isArray(p.labels) ? p.labels.slice() : [],
+            collections: Array.isArray(p.collections) ? p.collections.slice() : [],
+            videoResolution: p.videoResolution || null,
+            height: p.height != null ? p.height : null,
+            width: p.width != null ? p.width : null,
+            hdr: p.hdr === true,
+            videoRange: p.videoRange || null,
+            audioLanguage: p.audioLanguage || null,
+            subtitleLanguage: p.subtitleLanguage || null,
+            audioLanguages: Array.isArray(p.audioLanguages) ? p.audioLanguages.slice() : [],
+            subtitleLanguages: Array.isArray(p.subtitleLanguages) ? p.subtitleLanguages.slice() : [],
+            viewCount: p.viewCount != null ? p.viewCount : null,
+            viewOffset: p.viewOffset != null ? p.viewOffset : null,
+            libraryType: p.libraryType || null,
+        };
+    }
+
+    /**
+     * Aggregate filter fields from collection/playlist children for list-row filtering.
+     */
+    _aggregateFilterFields(children) {
+        let genres = {};
+        let ratings = {};
+        let studios = {};
+        let countries = {};
+        let labels = {};
+        let years = [];
+        let hasHdr = false;
+        let maxHeight = 0;
+        let kids = children || [];
+        for (let i = 0; i < kids.length; i++) {
+            let c = kids[i];
+            if (!c) continue;
+            (c.genres || []).forEach((g) => { if (g) genres[String(g)] = true; });
+            let r = c.contentRating || c.rating;
+            if (r) ratings[String(r)] = true;
+            if (c.studio) studios[String(c.studio)] = true;
+            (c.countries || []).forEach((x) => { if (x) countries[String(x)] = true; });
+            if (c.country) countries[String(c.country)] = true;
+            (c.labels || []).forEach((x) => { if (x) labels[String(x)] = true; });
+            if (c.year != null && !isNaN(Number(c.year))) years.push(Number(c.year));
+            if (c.hdr) hasHdr = true;
+            let h = Number(c.height) || 0;
+            if (h > maxHeight) maxHeight = h;
+        }
+        let yearMin = years.length ? Math.min.apply(null, years) : null;
+        let yearMax = years.length ? Math.max.apply(null, years) : null;
+        return {
+            genres: Object.keys(genres),
+            contentRatings: Object.keys(ratings),
+            studios: Object.keys(studios),
+            countries: Object.keys(countries),
+            labels: Object.keys(labels),
+            year: yearMin != null && yearMin === yearMax ? yearMin : null,
+            yearMin: yearMin,
+            yearMax: yearMax,
+            hdr: hasHdr,
+            height: maxHeight || null,
+            videoResolution: maxHeight >= 2000 ? '4k' : (maxHeight >= 1080 ? '1080' : (maxHeight >= 720 ? '720' : (maxHeight > 0 ? 'sd' : null))),
+        };
+    }
+
+    /**
      * Convert Plex Metadata entry → dizqueTV program-like object (no nested expansion).
+     * Stores filter-relevant metadata (genre, studio, people, media/resolution, watch state, …).
      */
     _metaToProgram(server, meta) {
         if (!meta || !meta.ratingKey) {
@@ -376,6 +616,16 @@ class PlexLibraryCacheService {
         if (typeof date === 'undefined' && typeof year !== 'undefined') {
             date = year + '-01-01';
         }
+        let genres = this._plexTags(meta.Genre);
+        let directors = this._plexTags(meta.Director);
+        let writers = this._plexTags(meta.Writer);
+        let producers = this._plexTags(meta.Producer);
+        let actors = this._plexTags(meta.Role);
+        let countries = this._plexTags(meta.Country);
+        let labels = this._plexTags(meta.Label);
+        let collections = this._plexTags(meta.Collection);
+        let contentRating = meta.contentRating || null;
+
         let program = {
             title: meta.title,
             key: meta.key,
@@ -388,14 +638,33 @@ class PlexLibraryCacheService {
             durationStr: undefined,
             subtitle: meta.subtitle,
             summary: meta.summary,
-            rating: meta.contentRating,
+            rating: contentRating,
+            contentRating: contentRating,
+            audienceRating: meta.audienceRating != null ? meta.audienceRating : null,
             date: date,
             year: year,
+            studio: meta.studio || null,
+            network: meta.studio || null, // TV often uses studio as network in Plex
+            country: countries.length ? countries[0] : null,
+            countries: countries,
+            genres: genres,
+            directors: directors,
+            writers: writers,
+            producers: producers,
+            actors: actors,
+            labels: labels,
+            collections: collections,
+            originalTitle: meta.originalTitle || null,
+            contentRatingAge: meta.contentRatingAge != null ? meta.contentRatingAge : null,
             updatedAt: meta.updatedAt != null ? Number(meta.updatedAt) : null,
             addedAt: meta.addedAt != null ? Number(meta.addedAt) : null,
+            viewCount: meta.viewCount != null ? Number(meta.viewCount) : 0,
+            viewOffset: meta.viewOffset != null ? Number(meta.viewOffset) : 0,
+            lastViewedAt: meta.lastViewedAt != null ? Number(meta.lastViewedAt) : null,
             serverKey: server.name,
             childCount: meta.childCount,
             leafCount: meta.leafCount,
+            viewedLeafCount: meta.viewedLeafCount != null ? Number(meta.viewedLeafCount) : null,
             index: meta.index,
             parentIndex: meta.parentIndex,
             parentKey: meta.parentKey,
@@ -405,8 +674,23 @@ class PlexLibraryCacheService {
             parentThumb: meta.parentThumb,
             librarySectionID: meta.librarySectionID,
             librarySectionTitle: meta.librarySectionTitle,
+            libraryType: meta.librarySectionID != null ? meta.type : null,
             parentRatingKey: meta.parentRatingKey != null ? String(meta.parentRatingKey) : null,
             grandparentRatingKey: meta.grandparentRatingKey != null ? String(meta.grandparentRatingKey) : null,
+            // media / tech (filled below)
+            videoResolution: null,
+            height: null,
+            width: null,
+            videoCodec: null,
+            audioCodec: null,
+            container: null,
+            videoFrameRate: null,
+            videoRange: null,
+            hdr: false,
+            audioLanguage: null,
+            subtitleLanguage: null,
+            audioLanguages: [],
+            subtitleLanguages: [],
         };
         try {
             if (
@@ -419,7 +703,68 @@ class PlexLibraryCacheService {
                 program.plexFile = meta.Media[0].Part[0].key;
                 program.file = meta.Media[0].Part[0].file;
             }
-        } catch (e) { /* ignore */ }
+            if (meta.Media && meta.Media[0]) {
+                let m0 = meta.Media[0];
+                program.videoResolution = m0.videoResolution || null;
+                program.height = m0.height != null ? Number(m0.height) : null;
+                program.width = m0.width != null ? Number(m0.width) : null;
+                program.videoCodec = m0.videoCodec || null;
+                program.audioCodec = m0.audioCodec || null;
+                program.container = m0.container || null;
+                program.videoFrameRate = m0.videoFrameRate || null;
+                program.videoRange = m0.videoDynamicRangeType || m0.videoRange || null;
+                let audioLangs = [];
+                let subLangs = [];
+                let hdr = false;
+                let parts = m0.Part || [];
+                for (let pi = 0; pi < parts.length; pi++) {
+                    let streams = parts[pi].Stream || [];
+                    for (let si = 0; si < streams.length; si++) {
+                        let st = streams[si];
+                        if (!st) continue;
+                        let stype = Number(st.streamType);
+                        let lang = st.languageCode || st.language || st.displayTitle || '';
+                        if (stype === 1) {
+                            // video
+                            let blob = [
+                                st.displayTitle, st.extendedDisplayTitle, st.title,
+                                st.DOVIPresent, st.hdr, m0.videoDynamicRangeType,
+                            ].filter(Boolean).join(' ').toLowerCase();
+                            if (
+                                blob.indexOf('hdr') >= 0
+                                || blob.indexOf('dolby vision') >= 0
+                                || blob.indexOf('dovi') >= 0
+                                || st.DOVIPresent === true
+                                || st.DOVIPresent === 1
+                            ) {
+                                hdr = true;
+                            }
+                            if (!program.videoRange && st.colorTrc) {
+                                program.videoRange = st.colorTrc;
+                            }
+                        } else if (stype === 2 && lang) {
+                            audioLangs.push(String(lang));
+                        } else if (stype === 3 && lang) {
+                            subLangs.push(String(lang));
+                        }
+                    }
+                }
+                if (
+                    program.videoRange
+                    && String(program.videoRange).toLowerCase().indexOf('sdr') < 0
+                ) {
+                    let vr = String(program.videoRange).toLowerCase();
+                    if (vr.indexOf('hdr') >= 0 || vr.indexOf('dolby') >= 0 || vr.indexOf('hlg') >= 0) {
+                        hdr = true;
+                    }
+                }
+                program.hdr = hdr;
+                program.audioLanguages = audioLangs;
+                program.subtitleLanguages = subLangs;
+                program.audioLanguage = audioLangs.length ? audioLangs[0] : null;
+                program.subtitleLanguage = subLangs.length ? subLangs[0] : null;
+            }
+        } catch (e) { /* ignore media parse */ }
 
         if (meta.type === 'episode') {
             program.showTitle = meta.grandparentTitle;
@@ -445,6 +790,8 @@ class PlexLibraryCacheService {
             program.season = meta.parentIndex;
         } else if (meta.type === 'show') {
             program.showTitle = meta.title;
+            // Shows: network sometimes in studio
+            program.network = meta.studio || program.network;
         }
         return program;
     }
@@ -589,10 +936,8 @@ class PlexLibraryCacheService {
         let meta = colRes.Metadata || [];
         for (let i = 0; i < meta.length; i++) {
             let m = meta[i];
+            // Badge already indicates "collection" — do not append the word to the title
             let title = m.title;
-            if (type === 'show') {
-                title = m.title + ' Collection';
-            }
             let children = [];
             try {
                 let childMetas = await this._fetchAllMetadata(client, m.key);
@@ -605,20 +950,24 @@ class PlexLibraryCacheService {
             } catch (e) {
                 console.error('plex-cache: collection children failed', m.title, e.message || e);
             }
-            collections.push({
+            let agg = this._aggregateFilterFields(children);
+            collections.push(Object.assign({
                 title: title,
                 key: m.key,
                 ratingKey: String(m.ratingKey || ''),
                 type: 'collection',
                 collectionType: type,
                 libraryTitle: section.title,
+                libraryType: type,
+                sectionKey: String(sectionKey),
+                librarySectionKey: String(sectionKey),
                 icon: m.thumb
                     ? server.uri + m.thumb + '?X-Plex-Token=' + server.accessToken
                     : '',
                 count: children.length || this._countHint(m),
                 children: children,
                 updatedAt: m.updatedAt != null ? Number(m.updatedAt) : null,
-            });
+            }, agg));
             if (typeof onProgress === 'function') {
                 try {
                     onProgress(i + 1, meta.length);
@@ -774,7 +1123,8 @@ class PlexLibraryCacheService {
             } catch (e) {
                 console.error('plex-cache: playlist items failed', m.title, e.message || e);
             }
-            list.push({
+            let agg = this._aggregateFilterFields(children);
+            list.push(Object.assign({
                 title: m.title,
                 key: m.key,
                 ratingKey: String(m.ratingKey || ''),
@@ -786,7 +1136,7 @@ class PlexLibraryCacheService {
                 playlistType: m.playlistType,
                 children: children,
                 updatedAt: m.updatedAt != null ? Number(m.updatedAt) : null,
-            });
+            }, agg));
         }
         let now = Date.now();
         this._savePlaylistsData(server.name, {
@@ -996,6 +1346,10 @@ class PlexLibraryCacheService {
 
     /**
      * Library sections list shaped like web plex.getLibrary()
+     * @param {string} serverName
+     * @param {{ includeDisabled?: boolean, includeHidden?: boolean }} [options]
+     *   includeHidden: include "Hide content" libraries (Add Filler needs this + client filler filter).
+     *   Default excludes hidden so they do not appear in programming / content sources.
      */
     getCachedSections(serverName, options) {
         options = options || {};
@@ -1013,6 +1367,9 @@ class PlexLibraryCacheService {
             let data = mem.libraries[keys[i]];
             if (!data) continue;
             if (!options.includeDisabled && this._isDisabled(serverName, data.sectionKey)) {
+                continue;
+            }
+            if (!options.includeHidden && this._isHidden(serverName, data.sectionKey)) {
                 continue;
             }
             sections.push({
@@ -1143,12 +1500,13 @@ class PlexLibraryCacheService {
         return null;
     }
 
-    getCachedCollectionsList(serverName) {
+    getCachedCollectionsList(serverName, options) {
         // Only authoritative when at least one movie/show library has been synced
+        options = options || {};
         if (!this.hasLibraryCache(serverName)) {
             return { list: null, fromCache: false };
         }
-        let sections = this.getCachedSections(serverName, {});
+        let sections = this.getCachedSections(serverName, options);
         let all = [];
         for (let i = 0; i < sections.length; i++) {
             let data = this.getCachedLibraryData(serverName, sections[i].sectionKey);
@@ -1156,27 +1514,67 @@ class PlexLibraryCacheService {
             let cols = data.collections || [];
             for (let c = 0; c < cols.length; c++) {
                 let col = cols[c];
-                all.push({
-                    title: col.title,
+                let count = col.count;
+                if ((count == null || count === '') && Array.isArray(col.children)) {
+                    count = col.children.length;
+                }
+                // Skip empty collections (no addable content)
+                if (count != null && count !== '' && !isNaN(parseInt(count, 10)) && parseInt(count, 10) <= 0) {
+                    continue;
+                }
+                if (Array.isArray(col.children) && col.children.length === 0) {
+                    continue;
+                }
+                let secKey = String(
+                    col.librarySectionKey
+                    || col.sectionKey
+                    || data.sectionKey
+                    || sections[i].sectionKey
+                    || ''
+                );
+                // Belt-and-suspenders: skip hidden library collections
+                if (!options.includeHidden && this._isListSourceHidden(serverName, Object.assign({}, col, {
+                    sectionKey: secKey,
+                    librarySectionKey: secKey,
+                    libraryTitle: col.libraryTitle || data.title,
+                }))) {
+                    continue;
+                }
+                // Omit children — nested endpoint still expands via cache; embedding
+                // full child trees made catalog list responses multi‑MB / multi‑second.
+                let colTitle = col.title || '';
+                if (typeof colTitle === 'string' && / Collection$/i.test(colTitle)) {
+                    colTitle = colTitle.replace(/ Collection$/i, '');
+                }
+                let row = Object.assign({
+                    title: colTitle,
                     key: col.key,
                     type: 'collection',
                     collectionType: col.collectionType,
                     libraryTitle: col.libraryTitle || data.title,
+                    libraryType: col.libraryType || col.collectionType || data.type,
+                    sectionKey: secKey,
+                    librarySectionKey: secKey,
                     icon: col.icon || '',
-                    count: col.count,
-                    children: col.children || [],
-                });
+                    count: count,
+                }, this._filterFieldsFromProgram(col));
+                // Prefer pre-aggregated fields stored on the collection during sync
+                if (Array.isArray(col.genres) && col.genres.length) row.genres = col.genres;
+                if (col.yearMin != null) row.yearMin = col.yearMin;
+                if (col.yearMax != null) row.yearMax = col.yearMax;
+                if (col.year != null) row.year = col.year;
+                all.push(row);
             }
         }
         return { list: all, fromCache: true };
     }
 
-    getCachedShowsList(serverName) {
+    getCachedShowsList(serverName, options) {
         // Only authoritative when at least one TV show library has been synced
         if (!this.hasLibraryCache(serverName, { type: 'show' })) {
             return { list: null, fromCache: false };
         }
-        let sections = this.getCachedSections(serverName, {});
+        let sections = this.getCachedSections(serverName, options || {});
         let all = [];
         for (let i = 0; i < sections.length; i++) {
             if (sections[i].type !== 'show') continue;
@@ -1227,39 +1625,68 @@ class PlexLibraryCacheService {
                         if (isNaN(episodeCount)) episodeCount = null;
                     }
                 }
-                all.push({
+                all.push(Object.assign({
                     title: s.title,
                     key: s.key,
                     type: 'show',
                     libraryTitle: data.title,
+                    libraryType: 'show',
+                    sectionKey: String(data.sectionKey || sections[i].sectionKey || ''),
+                    librarySectionKey: String(data.sectionKey || sections[i].sectionKey || ''),
                     icon: s.icon || '',
                     ratingKey: s.ratingKey,
                     seasonCount: seasonCount,
                     episodeCount: episodeCount,
                     // count kept for callers that expect a single number (episodes preferred)
                     count: episodeCount != null ? episodeCount : (seasonCount != null ? seasonCount : null),
-                });
+                }, this._filterFieldsFromProgram(s)));
             }
         }
         return { list: all, fromCache: true };
     }
 
-    getCachedPlaylistsList(serverName) {
+    getCachedPlaylistsList(serverName, options) {
+        options = options || {};
         let pl = this.getCachedPlaylists(serverName);
         if (!pl) {
             return { list: null, fromCache: false };
         }
-        return {
-            fromCache: true,
-            list: (pl.playlists || []).map((p) => ({
+        let list = [];
+        let src = pl.playlists || [];
+        for (let i = 0; i < src.length; i++) {
+            let p = src[i];
+            let count = p.count;
+            if ((count == null || count === '') && Array.isArray(p.children)) {
+                count = p.children.length;
+            }
+            // Skip empty playlists (no addable content)
+            if (count != null && count !== '' && !isNaN(parseInt(count, 10)) && parseInt(count, 10) <= 0) {
+                continue;
+            }
+            if (Array.isArray(p.children) && p.children.length === 0) {
+                continue;
+            }
+            // Global playlists: hide when all content is from "Hide content" libraries
+            if (!options.includeHidden && this._isListSourceHidden(serverName, p)) {
+                continue;
+            }
+            // Omit children — nested/expand paths load them from cache by key.
+            let row = Object.assign({
                 title: p.title,
                 key: p.key,
                 icon: p.icon,
                 duration: p.duration,
-                count: p.count,
+                count: count,
                 type: 'playlist',
-                children: p.children || [],
-            })),
+            }, this._filterFieldsFromProgram(p));
+            if (Array.isArray(p.genres) && p.genres.length) row.genres = p.genres;
+            if (p.yearMin != null) row.yearMin = p.yearMin;
+            if (p.yearMax != null) row.yearMax = p.yearMax;
+            list.push(row);
+        }
+        return {
+            fromCache: true,
+            list: list,
         };
     }
 

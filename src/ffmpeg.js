@@ -155,11 +155,22 @@ class FFMPEG extends events.EventEmitter {
         }
 
         // Put -ss BEFORE -i for input-level seek (much faster than decode-seek).
-        // -noaccurate_seek trades frame-exactness for speed on mid-program joins.
+        //
+        // IMPORTANT: -noaccurate_seek may start mid-GOP. When video is *copied*,
+        // the client gets P/B frames with no IDR → black picture + audio only until
+        // the next keyframe (intermittent by join point). Only use fast seek when we
+        // will re-encode video (encoder emits a keyframe at the start of the segment).
         if (typeof startTime !== 'undefined' && !isGenerated) {
             ffmpegArgs.push(`-ss`, startTime);
-            if (this.opts.fastSeek !== false) {
+            let willReencodeVideo = willLikelyReencodeVideo(this.opts, streamStats, watermark);
+            if (this.opts.fastSeek !== false && willReencodeVideo) {
                 ffmpegArgs.push(`-noaccurate_seek`);
+            } else if (!willReencodeVideo && typeof startTime !== 'undefined') {
+                // Log once so operators know mid-join seeks are keyframe-aligned (slower, correct)
+                console.log(
+                    'dizqueTV ffmpeg: accurate seek (video may be copied) start=' + startTime +
+                    ' — avoids black video until next keyframe'
+                );
             }
         }
 
@@ -180,10 +191,14 @@ class FFMPEG extends events.EventEmitter {
             let videoFile = -1;
             let overlayFile = -1;
             if ( !isGenerated ) {
-                // Hardware decode (CUDA/QSV/etc.) — before -i. Frames stay in system
-                // memory so CPU filters (scale/tonemap/subtitles) keep working.
+                // Hardware decode (CUDA/QSV/etc.) before -i.
+                // We intentionally do NOT set -hwaccel_output_format, so FFmpeg
+                // delivers system-memory frames and CPU filters (scale/overlay)
+                // work. Do NOT insert hwdownload here — that expects GPU frames
+                // and fails with "Function not implemented" when frames are
+                // already in RAM (see nv12 → hwdownload error).
                 appendHardwareDecodeFlags(ffmpegArgs, this.opts, streamStats);
-                // HTTP reconnect helps when reading from Plex over the network
+                // HTTP reconnect helps when reading from Plex/Jellyfin over the network
                 if (typeof streamUrl === 'string' && /^https?:\/\//i.test(streamUrl)) {
                     ffmpegArgs.push(
                         `-reconnect`, `1`,
@@ -201,15 +216,35 @@ class FFMPEG extends events.EventEmitter {
             // filters to apply.
             //
             var doOverlay = ( (typeof(watermark)==='undefined') || (watermark != null) );
-            var iW =  streamStats.videoWidth;
-            var iH =  streamStats.videoHeight;
+            // Missing dimensions (e.g. Jellyfin before probe) must not be left as
+            // undefined — scale/pad math then hits gcd(NaN,NaN) and freezes the process.
+            var iW = (streamStats && streamStats.videoWidth) ? streamStats.videoWidth : this.wantedW;
+            var iH = (streamStats && streamStats.videoHeight) ? streamStats.videoHeight : this.wantedH;
+            if (typeof iW !== 'number' || isNaN(iW) || iW <= 0) iW = this.wantedW || 1920;
+            if (typeof iH !== 'number' || isNaN(iH) || iH <= 0) iH = this.wantedH || 1080;
+            if (!streamStats) streamStats = {};
+            if (typeof streamStats.pixelP !== 'number' || isNaN(streamStats.pixelP) || streamStats.pixelP <= 0) {
+                streamStats.pixelP = 1;
+            }
+            if (typeof streamStats.pixelQ !== 'number' || isNaN(streamStats.pixelQ) || streamStats.pixelQ <= 0) {
+                streamStats.pixelQ = 1;
+            }
 
             // (explanation is the same for the video and audio streams)
             // The initial stream is called '[video]'
+            // vLabel() keeps filter graph labels as exactly one pair of brackets
+            // (avoids [[blackpadded]] when code both stores and re-wraps labels).
+            function vLabel(name) {
+                if (name == null || name === '') return '[video]';
+                let s = String(name).trim();
+                while (s.charAt(0) === '[' && s.charAt(s.length - 1) === ']') {
+                    s = s.slice(1, -1);
+                }
+                return '[' + s + ']';
+            }
             var currentVideo = "[video]";
             var currentAudio = "[audio]";
-            // Initially, videoComplex does nothing besides assigning the label
-            // to the input stream
+            // Prefer first video stream (0:v). Explicit 0:v:0 can fail on some builds.
             var videoIndex = 'v';
             // Always pin the chosen audio stream as [audio] so later filters
             // (volume/apad) and -map never fall back to stream 0 / first audio.
@@ -442,8 +477,8 @@ class FFMPEG extends events.EventEmitter {
                     cw = hypotheticalW2;
                     ch = hypotheticalH2;
                 }
-                videoComplex += `;${currentVideo}scale=${cw}:${ch}:flags=${algo}[scaled]`;
-                currentVideo = "scaled";
+                videoComplex += `;${vLabel(currentVideo)}scale=${cw}:${ch}:flags=${algo}[scaled]`;
+                currentVideo = "[scaled]";
                 resizeMsg = `Stretch to ${cw} x ${ch}. To fit target resolution of ${this.wantedW} x ${this.wantedH}.`;
                 if (this.ensureResolution) {
                     console.log(`First stretch to ${cw} x ${ch}. Then add padding to make it ${this.wantedW} x ${this.wantedH} `);
@@ -459,14 +494,14 @@ class FFMPEG extends events.EventEmitter {
                 }
                 if ( (this.wantedW != cw) || (this.wantedH != ch) ) {
                     // also add black bars, because in this case it HAS to be this resolution
-                    videoComplex += `;[${currentVideo}]pad=${this.wantedW}:${this.wantedH}:(ow-iw)/2:(oh-ih)/2[blackpadded]`;
-                    currentVideo = "blackpadded";
+                    videoComplex += `;${vLabel(currentVideo)}pad=${this.wantedW}:${this.wantedH}:(ow-iw)/2:(oh-ih)/2[blackpadded]`;
+                    currentVideo = "[blackpadded]";
                 }
                 let name = "siz";
                 if (! this.ensureResolution && (beforeSizeChange != '[fpchange]') ) {
                     name = "minsiz";
                 }
-                videoComplex += `;[${currentVideo}]setsar=1[${name}]`;
+                videoComplex += `;${vLabel(currentVideo)}setsar=1[${name}]`;
                 currentVideo = `[${name}]`;
                 iW = this.wantedW;
                 iH = this.wantedH;
@@ -486,7 +521,7 @@ class FFMPEG extends events.EventEmitter {
                     needFmt = false;
                 }
                 if (needFmt) {
-                    let vIn = currentVideo.charAt(0) === '[' ? currentVideo : `[${currentVideo}]`;
+                    let vIn = vLabel(currentVideo);
                     // Only add if we will filter video (scale already did, or watermark will)
                     if (vIn !== '[video]') {
                         videoComplex += `;${vIn}format=yuv420p[vfmt]`;
@@ -666,24 +701,34 @@ class FFMPEG extends events.EventEmitter {
                 ffmpegArgs.push(
                     '-map', currentVideo,
                     `-c:v`, (transcodeVideo ? this.opts.videoEncoder : 'copy'),
-                    `-sc_threshold`, `1000000000`,
                 );
                 // NVENC (and most software encoders) need a standard pixel format after
                 // filters like subtitles=/zscale. Force yuv420p whenever we transcode.
                 if (transcodeVideo) {
-                    ffmpegArgs.push('-pix_fmt', 'yuv420p');
+                    // Scene-change threshold off (sc_threshold=0) so GOP is predictable;
+                    // force an IDR on the first frame so Plex/concat never starts mid-GOP.
+                    ffmpegArgs.push(
+                        '-pix_fmt', 'yuv420p',
+                        '-force_key_frames', 'expr:eq(n,0)',
+                        '-sc_threshold', '0'
+                    );
                     // Low-latency encode path (faster first frame, less internal buffering)
                     appendVideoEncoderLowLatencyFlags(ffmpegArgs, this.opts.videoEncoder);
+                } else {
+                    // Copy path: huge sc_threshold was historically used; keep mild default
+                    ffmpegArgs.push(`-sc_threshold`, `1000000000`);
                 }
                 // do not use -tune stillimage for nv
                 if (stillImage && ! this.opts.videoEncoder.toLowerCase().includes("nv") ) {
                     ffmpegArgs.push('-tune', 'stillimage');
                 }
             }
-            // cgop keeps closed GOPs for MPEG-TS (do not force low_delay — breaks some NVENC/filter graphs)
+            // cgop = closed GOPs for MPEG-TS mid-join recovery.
+            // Do NOT set +ilme (interlaced ME) — progressive H.264/HEVC can show
+            // black / broken video on some clients when that flag is present.
             ffmpegArgs.push(
                             '-map', currentAudio,
-                            `-flags`, `cgop+ilme`,
+                            `-flags`, `cgop`,
             );
             console.log(`dizqueTV ffmpeg: -map audio ${currentAudio} (spec=${audioIndex}, force=${forceAudioTrack})`);
 
@@ -845,9 +890,11 @@ class FFMPEG extends events.EventEmitter {
             // fragmented mp4 for streaming over HTTP pipe
             ffmpegArgs.push(`-movflags`, `frag_keyframe+empty_moov+default_base_moof`, `-f`, `mp4`, `pipe:1`);
         } else {
-            // MPEG-TS: resend PAT/PMT so late joiners / prewarm handoff lock quickly
+            // MPEG-TS: resend PAT/PMT so late joiners / prewarm handoff lock quickly.
+            // +initial_discontinuity marks a clean stream start after loading→program
+            // concat switches (helps Plex resync video when only audio was audible).
             ffmpegArgs.push(
-                `-mpegts_flags`, `+resend_headers`,
+                `-mpegts_flags`, `+resend_headers+initial_discontinuity`,
                 `-f`, `mpegts`, `pipe:1`
             );
         }
@@ -1143,10 +1190,45 @@ function getMuxDelaySeconds(opts) {
 }
 
 /**
+ * True when this spawn is likely to re-encode video (filters and/or codec change).
+ * Used to decide whether -noaccurate_seek is safe (copy + mid-GOP seek = black video).
+ */
+function willLikelyReencodeVideo(opts, streamStats, watermark) {
+    if (!opts || opts.enableFFMPEGTranscoding === false || opts.remuxOnly === true) {
+        return false;
+    }
+    if (opts.normalizeVideoCodec === true && streamStats && streamStats.videoCodec) {
+        if (isDifferentVideoCodec(streamStats.videoCodec, opts.videoEncoder)) {
+            return true;
+        }
+    }
+    if (opts.normalizeResolution === true) {
+        return true;
+    }
+    if (opts.enableHdrToneMapping === true && streamStats && streamStats.isHDR === true) {
+        return true;
+    }
+    if (opts.deinterlaceFilter && opts.deinterlaceFilter !== 'none'
+        && streamStats && streamStats.videoScanType === 'interlaced') {
+        return true;
+    }
+    // Watermark / overlay forces a filter graph → must encode
+    if (watermark != null && typeof watermark !== 'undefined' && watermark !== false) {
+        return true;
+    }
+    // Subtitle burn path always re-encodes
+    if (streamStats && streamStats.burnExtractedSubtitles === true) {
+        return true;
+    }
+    // If normalize video codec is on but codecs already match, still may copy —
+    // accurate seek is safer for intermittent black-screen-with-audio.
+    return false;
+}
+
+/**
  * Hardware decode (-hwaccel …) before -i.
- * Frames are left in system memory (no -hwaccel_output_format) so software
- * filters (scale, zscale tonemap, subtitles burn) continue to work. Still a
- * large win for 4K HEVC/HDR decode on CUDA/QSV/D3D11.
+ * Returns accel name if applied, otherwise null.
+ * Callers that use CPU filters (scale/overlay) must hwdownload when non-null.
  *
  * IMPORTANT: when software HDR→SDR tonemap is enabled, hwaccel is skipped.
  * CUDA/D3D11 download often collapses 10-bit PQ/HLG to 8-bit before zscale
@@ -1154,20 +1236,24 @@ function getMuxDelaySeconds(opts) {
  */
 function appendHardwareDecodeFlags(ffmpegArgs, opts, streamStats) {
     if (!opts || opts.enableFFMPEGTranscoding === false) {
-        return;
+        return null;
     }
     // Remux/copy-only paths do not need decode accel
     if (opts.remuxOnly === true) {
-        return;
+        return null;
     }
     // Generated offline/error screens have no real video input
     if (!streamStats || streamStats.audioOnly === true) {
-        return;
+        return null;
+    }
+    if (opts.forceSoftwareDecode === true) {
+        console.log('dizqueTV: forceSoftwareDecode — skipping hwaccel');
+        return null;
     }
 
     let mode = (opts.hardwareDecode || 'none').toString().toLowerCase().trim();
     if (!mode || mode === 'none' || mode === 'off' || mode === 'disabled') {
-        return;
+        return null;
     }
 
     // Software tonemap needs full bit-depth + transfer metadata from the decoder
@@ -1180,7 +1266,7 @@ function appendHardwareDecodeFlags(ffmpegArgs, opts, streamStats) {
             'dizqueTV: skipping hwaccel — HDR tone mapping needs software decode ' +
             '(10-bit PQ/HLG). Encode still uses NVENC/QSV if configured.'
         );
-        return;
+        return null;
     }
 
     let accel = mode;
@@ -1197,7 +1283,7 @@ function appendHardwareDecodeFlags(ffmpegArgs, opts, streamStats) {
             accel = 'videotoolbox';
         } else {
             // Software encoder: leave decode on CPU unless user picks an explicit accel
-            return;
+            return null;
         }
     }
 
@@ -1207,7 +1293,7 @@ function appendHardwareDecodeFlags(ffmpegArgs, opts, streamStats) {
     ];
     if (allowed.indexOf(accel) === -1) {
         console.log(`dizqueTV: unknown hardwareDecode="${mode}", skipping hwaccel`);
-        return;
+        return null;
     }
 
     ffmpegArgs.push(`-hwaccel`, accel);
@@ -1243,8 +1329,9 @@ function appendHardwareDecodeFlags(ffmpegArgs, opts, streamStats) {
         (opts.hardwareDecodeDevice != null && String(opts.hardwareDecodeDevice).trim() !== ''
             ? ` device=${opts.hardwareDecodeDevice}`
             : '') +
-        ` (frames → system memory for CPU filters)`
+        ` (system-memory frames for CPU filters; no hwdownload)`
     );
+    return accel;
 }
 
 /**
@@ -1474,6 +1561,10 @@ function isDifferentAudioCodec(codec, encoder) {
 }
 
 function isLargerResolution( w1,h1, w2,h2) {
+    w1 = Number(w1); h1 = Number(h1); w2 = Number(w2); h2 = Number(h2);
+    if (isNaN(w1) || isNaN(h1) || isNaN(w2) || isNaN(h2)) {
+        return false;
+    }
     return (w1 > w2) || (h1 > h2) || (w1 % 2 ==1) || (h1 % 2 == 1);
 }
 
@@ -1492,13 +1583,25 @@ function parseResolutionString(s) {
 }
 
 function gcd(a, b) {
-    
-    while (b != 0) {
+    a = Math.abs(Math.floor(Number(a)));
+    b = Math.abs(Math.floor(Number(b)));
+    if (isNaN(a) || isNaN(b) || a === 0) {
+        return b || 1;
+    }
+    if (b === 0) {
+        return a || 1;
+    }
+    // Bound iterations so NaN/corrupt values can never freeze the event loop
+    let guard = 64;
+    while (b != 0 && guard-- > 0) {
         let c = b;
         b = a % b;
         a = c;
+        if (isNaN(b) || isNaN(a)) {
+            return 1;
+        }
     }
-    return a;
+    return a || 1;
 }
 
 module.exports = FFMPEG

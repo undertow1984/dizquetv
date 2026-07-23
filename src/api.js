@@ -7,6 +7,8 @@ const JSONStream = require('JSONStream');
 const FFMPEGInfo = require('./ffmpeg-info');
 const PlexServerDB = require('./dao/plex-server-db');
 const Plex = require("./plex.js");
+const JellyfinServerDB = require('./dao/jellyfin-server-db');
+const Jellyfin = require("./jellyfin.js");
 
 const timeSlotsService = require('./services/time-slots-service');
 const randomSlotsService = require('./services/random-slots-service');
@@ -24,10 +26,15 @@ function safeString(object) {
 }
 
 module.exports = { router: api }
-function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideService, _m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService ) {
+function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideService, _m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService, jellyfinLibraryCacheService ) {
     let m3uService = _m3uService;
     const router = express.Router()
     const plexServerDB = new PlexServerDB(channelService, fillerDB, customShowDB, db);
+    const jellyfinServerDB = new JellyfinServerDB(channelService, fillerDB, customShowDB, db);
+    const ExternalListService = require('./services/external-list-service');
+    const externalListService = new ExternalListService(db, plexLibraryCacheService, jellyfinLibraryCacheService);
+    const TrackedListService = require('./services/tracked-list-service');
+    const trackedListService = new TrackedListService(db, externalListService, channelService, customShowDB);
 
     router.get('/api/version', async (req, res) => {
       try {
@@ -217,6 +224,492 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         }
     })
 
+    // Jellyfin Servers
+    router.get('/api/jellyfin-servers', (req, res) => {
+        try {
+            let servers = db['jellyfin-servers'].find();
+            servers.sort((a, b) => { return a.index < b.index ? -1 : 1 });
+            // Do not expose full API keys in list responses? Keep parity with Plex (token is returned).
+            res.send(servers);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.post("/api/jellyfin-servers/status", async (req, res) => {
+        try {
+            let servers = db['jellyfin-servers'].find({ name: req.body.name });
+            if (servers.length != 1) {
+                return res.status(404).send("Jellyfin server not found");
+            }
+            let jf = new Jellyfin(servers[0]);
+            let status = await jf.checkServerStatus();
+            res.send({ status: status });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.post("/api/jellyfin-servers/foreignstatus", async (req, res) => {
+        try {
+            let server = req.body;
+            let jf = new Jellyfin(server);
+            let status = await jf.checkServerStatus();
+            res.send({ status: status });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.delete('/api/jellyfin-servers', async (req, res) => {
+        try {
+            let name = req.body.name;
+            if (typeof (name) === 'undefined') {
+                return res.status(400).send("Missing name");
+            }
+            let report = await jellyfinServerDB.deleteServer(name);
+            eventService.push(
+                "settings-update",
+                {
+                    "message": `Jellyfin server ${name} removed.`,
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "serverName": name,
+                        "action": "delete"
+                    },
+                    "level": "warning"
+                }
+            );
+            res.send(report);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Error deleting jellyfin server.",
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "action": "delete",
+                        "serverName": safeString(req, "body", "name"),
+                        "error": safeString(err, "message"),
+                    },
+                    "level": "danger"
+                }
+            );
+        }
+    });
+
+    router.post('/api/jellyfin-servers', async (req, res) => {
+        try {
+            let report = await jellyfinServerDB.updateServer(req.body);
+            res.status(204).send("Jellyfin server updated.");
+            let modifiedPrograms = 0;
+            let destroyedPrograms = 0;
+            report.forEach((r) => {
+                modifiedPrograms += r.modifiedPrograms;
+                destroyedPrograms += r.destroyedPrograms;
+            });
+            eventService.push(
+                "settings-update",
+                {
+                    "message": `Jellyfin server ${req.body.name} updated. ${modifiedPrograms} programs modified, ${destroyedPrograms} programs deleted`,
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "serverName": req.body.name,
+                        "action": "update",
+                        "destroyedPrograms": destroyedPrograms,
+                        "modifiedPrograms": modifiedPrograms,
+                    },
+                    "level": "info"
+                }
+            );
+        } catch (err) {
+            console.error("Could not update jellyfin server.", err);
+            res.status(400).send("Could not update jellyfin server.");
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Error updating jellyfin server.",
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "action": "update",
+                        "serverName": safeString(req, "body", "name"),
+                        "error": safeString(err, "message"),
+                    },
+                    "level": "danger"
+                }
+            );
+        }
+    });
+
+    router.put('/api/jellyfin-servers', async (req, res) => {
+        try {
+            let created = await jellyfinServerDB.addServer(req.body);
+            res.status(201).send(created || "Jellyfin server added.");
+            eventService.push(
+                "settings-update",
+                {
+                    "message": `Jellyfin server ${created ? created.name : req.body.name} added.`,
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "serverName": created ? created.name : req.body.name,
+                        "action": "add"
+                    },
+                    "level": "info"
+                }
+            );
+        } catch (err) {
+            console.error("Could not add jellyfin server.", err);
+            res.status(400).send(err.message || "Could not add jellyfin server.");
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Error adding jellyfin server.",
+                    "module": "jellyfin-server",
+                    "detail": {
+                        "action": "add",
+                        "serverName": safeString(req, "body", "name"),
+                        "error": safeString(err, "message"),
+                    },
+                    "level": "danger"
+                }
+            );
+        }
+    });
+
+    /**
+     * Proxy a GET to a configured Jellyfin server so the web UI avoids CORS.
+     * Body: { name, path, params }
+     * path may include "{userId}" which is replaced after ensureUserId().
+     */
+    router.post('/api/jellyfin-servers/proxy', async (req, res) => {
+        try {
+            let name = req.body && req.body.name;
+            let path = req.body && req.body.path;
+            let params = (req.body && req.body.params) || {};
+            if (!name || !path) {
+                return res.status(400).send("Missing name or path");
+            }
+            // Disallow absolute URLs / path traversal
+            if (typeof path !== 'string' || path.indexOf('://') !== -1 || path.indexOf('..') !== -1) {
+                return res.status(400).send("Invalid path");
+            }
+            let servers = db['jellyfin-servers'].find({ name: name });
+            if (servers.length != 1) {
+                return res.status(404).send("Jellyfin server not found");
+            }
+            let jf = new Jellyfin(servers[0]);
+            if (path.indexOf('{userId}') !== -1) {
+                // ensureUserId validates GUID / resolves username → Id
+                let uid = await jf.ensureUserId();
+                path = path.split('{userId}').join(uid);
+                // Persist only a validated user GUID
+                if (uid && Jellyfin.isLikelyJellyfinUserId(uid) && servers[0].userId !== uid) {
+                    try {
+                        let row = servers[0];
+                        row.userId = uid;
+                        db['jellyfin-servers'].update({ _id: row._id }, row);
+                    } catch (e) { /* ignore */ }
+                }
+            }
+            if (!path.startsWith('/')) {
+                path = '/' + path;
+            }
+            let data = await jf.Get(path, params);
+            res.send(data);
+        } catch (err) {
+            console.error("Jellyfin proxy error", err);
+            res.status(502).send(err.message || "Jellyfin proxy failed");
+        }
+    });
+
+    // ---- Jellyfin library settings + local cache ----
+    function getJellyfinLibrarySettingsDoc() {
+        if (jellyfinLibraryCacheService && typeof jellyfinLibraryCacheService.getSettingsDoc === 'function') {
+            return jellyfinLibraryCacheService.getSettingsDoc();
+        }
+        let rows = db['jellyfin-library-settings'].find();
+        if (!rows || rows.length === 0) {
+            let doc = {
+                disabledLibraries: [],
+                fillerLibraries: [],
+                hiddenLibraries: [],
+                autoSyncHours: 0,
+                lastGlobalSyncAt: null,
+                librarySync: {},
+            };
+            db['jellyfin-library-settings'].save(doc);
+            rows = db['jellyfin-library-settings'].find();
+        }
+        let doc = rows[0];
+        if (!Array.isArray(doc.disabledLibraries)) {
+            doc.disabledLibraries = [];
+        }
+        if (!Array.isArray(doc.fillerLibraries)) {
+            doc.fillerLibraries = [];
+        }
+        if (!Array.isArray(doc.hiddenLibraries)) {
+            doc.hiddenLibraries = [];
+        }
+        return doc;
+    }
+
+    function normalizeLibraryRefList(list) {
+        if (!Array.isArray(list)) {
+            return [];
+        }
+        return list.map((d) => {
+            return {
+                serverName: String(d.serverName || ""),
+                sectionKey: String(d.sectionKey || ""),
+                title: d.title ? String(d.title) : undefined,
+                type: d.type ? String(d.type) : undefined,
+            };
+        }).filter((d) => d.serverName && d.sectionKey);
+    }
+
+    router.get('/api/jellyfin-library-settings', (req, res) => {
+        try {
+            let doc = getJellyfinLibrarySettingsDoc();
+            let syncStatus = jellyfinLibraryCacheService
+                ? jellyfinLibraryCacheService.getSyncStatus()
+                : { autoSyncHours: doc.autoSyncHours || 0, lastGlobalSyncAt: doc.lastGlobalSyncAt || null, librarySync: doc.librarySync || {}, syncing: [] };
+            res.send({
+                disabledLibraries: doc.disabledLibraries || [],
+                fillerLibraries: doc.fillerLibraries || [],
+                hiddenLibraries: doc.hiddenLibraries || [],
+                autoSyncHours: syncStatus.autoSyncHours || 0,
+                lastGlobalSyncAt: syncStatus.lastGlobalSyncAt || null,
+                librarySync: syncStatus.librarySync || {},
+                syncing: syncStatus.syncing || [],
+            });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.put('/api/jellyfin-library-settings', (req, res) => {
+        try {
+            let doc = getJellyfinLibrarySettingsDoc();
+            let disabled = req.body && req.body.disabledLibraries;
+            if (!Array.isArray(disabled)) {
+                return res.status(400).send("disabledLibraries must be an array");
+            }
+            doc.disabledLibraries = normalizeLibraryRefList(disabled);
+            if (typeof req.body.fillerLibraries !== 'undefined') {
+                if (!Array.isArray(req.body.fillerLibraries)) {
+                    return res.status(400).send("fillerLibraries must be an array");
+                }
+                doc.fillerLibraries = normalizeLibraryRefList(req.body.fillerLibraries);
+            }
+            if (typeof req.body.hiddenLibraries !== 'undefined') {
+                if (!Array.isArray(req.body.hiddenLibraries)) {
+                    return res.status(400).send("hiddenLibraries must be an array");
+                }
+                doc.hiddenLibraries = normalizeLibraryRefList(req.body.hiddenLibraries);
+            }
+
+            if (typeof req.body.autoSyncHours !== 'undefined') {
+                let n = parseFloat(req.body.autoSyncHours);
+                if (isNaN(n) || n < 0) n = 0;
+                if (n > 168) n = 168;
+                doc.autoSyncHours = n;
+            }
+
+            if (jellyfinLibraryCacheService && typeof jellyfinLibraryCacheService.saveSettingsDoc === 'function') {
+                jellyfinLibraryCacheService.saveSettingsDoc(doc);
+            } else {
+                db['jellyfin-library-settings'].update({ _id: doc._id }, doc);
+            }
+            let syncStatus = jellyfinLibraryCacheService
+                ? jellyfinLibraryCacheService.getSyncStatus()
+                : { autoSyncHours: doc.autoSyncHours || 0, lastGlobalSyncAt: doc.lastGlobalSyncAt || null, librarySync: doc.librarySync || {}, syncing: [] };
+            res.send({
+                disabledLibraries: doc.disabledLibraries,
+                fillerLibraries: doc.fillerLibraries || [],
+                hiddenLibraries: doc.hiddenLibraries || [],
+                autoSyncHours: syncStatus.autoSyncHours || 0,
+                lastGlobalSyncAt: syncStatus.lastGlobalSyncAt || null,
+                librarySync: syncStatus.librarySync || {},
+                syncing: syncStatus.syncing || [],
+            });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.get('/api/jellyfin-library-cache/status', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            res.send(jellyfinLibraryCacheService.getSyncStatus());
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.post('/api/jellyfin-library-cache/sync-all', async (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let full = !!(req.body && req.body.full);
+            let result = await jellyfinLibraryCacheService.syncAll({ full: full, reason: 'manual' });
+            res.send(result);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.post('/api/jellyfin-library-cache/sync-library', async (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let serverName = req.body && req.body.serverName;
+            let sectionKey = req.body && req.body.sectionKey;
+            let full = !!(req.body && req.body.full);
+            if (!serverName || sectionKey == null || sectionKey === '') {
+                return res.status(400).send("serverName and sectionKey required");
+            }
+            let result = await jellyfinLibraryCacheService.syncLibrary(serverName, sectionKey, { full: full });
+            res.send(result);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.post('/api/jellyfin-library-cache/delete-library', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let serverName = req.body && req.body.serverName;
+            let sectionKey = req.body && req.body.sectionKey;
+            if (!serverName || sectionKey == null || sectionKey === '') {
+                return res.status(400).send("serverName and sectionKey required");
+            }
+            res.send(jellyfinLibraryCacheService.deleteLibraryCache(serverName, sectionKey));
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.post('/api/jellyfin-library-cache/delete-all', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            res.send(jellyfinLibraryCacheService.deleteAllCache());
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.get('/api/jellyfin-library-cache/sections/:serverName', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let includeDisabled = req.query.includeDisabled === '1' || req.query.includeDisabled === 'true';
+            let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+            let has = jellyfinLibraryCacheService.hasLibraryCache
+                ? jellyfinLibraryCacheService.hasLibraryCache(req.params.serverName)
+                : jellyfinLibraryCacheService.hasServerCache(req.params.serverName);
+            let sections = jellyfinLibraryCacheService.getCachedSections(req.params.serverName, {
+                includeDisabled: includeDisabled,
+                includeHidden: includeHidden,
+            });
+            res.send({ fromCache: !!has, sections: sections || [] });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.get('/api/jellyfin-library-cache/playlists/:serverName', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+            let r = jellyfinLibraryCacheService.getCachedPlaylistsList(req.params.serverName, {
+                includeHidden: includeHidden,
+            });
+            res.send({ fromCache: !!r.fromCache, playlists: r.list || [] });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.get('/api/jellyfin-library-cache/collections/:serverName', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+            let r = jellyfinLibraryCacheService.getCachedCollectionsList(req.params.serverName, {
+                includeHidden: includeHidden,
+            });
+            res.send({ fromCache: !!r.fromCache, collections: r.list || [] });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.get('/api/jellyfin-library-cache/shows/:serverName', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+            let r = jellyfinLibraryCacheService.getCachedShowsList(req.params.serverName, {
+                includeHidden: includeHidden,
+            });
+            res.send({ fromCache: !!r.fromCache, shows: r.list || [] });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.post('/api/jellyfin-library-cache/nested', (req, res) => {
+        try {
+            if (!jellyfinLibraryCacheService) {
+                return res.status(503).send("cache service unavailable");
+            }
+            let serverName = req.body && req.body.serverName;
+            let key = req.body && req.body.key;
+            let includeCollections = req.body && req.body.includeCollections;
+            if (!serverName || key == null) {
+                return res.status(400).send("serverName and key required");
+            }
+            let r = jellyfinLibraryCacheService.getCachedNested(serverName, key, {
+                includeCollections: includeCollections,
+            });
+            if (!r) {
+                return res.send({ fromCache: false, nested: null });
+            }
+            res.send({ fromCache: true, nested: r.nested || [], kind: r.kind, note: r.note });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
 
     // Channels
     router.get('/api/channels', async (req, res) => {
@@ -330,9 +823,22 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     // we urgently need an actual channel service
     router.post('/api/channel', async (req, res) => {
       try {
+        let previousNumber =
+          typeof req.body.previousNumber !== 'undefined'
+            ? req.body.previousNumber
+            : (typeof req.body.originalNumber !== 'undefined' ? req.body.originalNumber : null);
         await channelService.saveChannel( req.body.number, req.body );
         // Return saved channel so UI can pick up generated logo path, etc.
         let saved = await channelService.getChannel(req.body.number);
+        try {
+          if (trackedListService) {
+            await trackedListService.applyChannelSave(saved || req.body, {
+              previousNumber: previousNumber,
+            });
+          }
+        } catch (syncErr) {
+          console.error('tracked-list channel sync on create failed', syncErr.message || syncErr);
+        }
         res.send( saved || { number: req.body.number } )
       } catch(err) {
         console.error(err);
@@ -341,8 +847,21 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     })
     router.put('/api/channel', async (req, res) => {
       try {
+        let previousNumber =
+          typeof req.body.previousNumber !== 'undefined'
+            ? req.body.previousNumber
+            : (typeof req.body.originalNumber !== 'undefined' ? req.body.originalNumber : null);
         await channelService.saveChannel( req.body.number, req.body );
         let saved = await channelService.getChannel(req.body.number);
+        try {
+          if (trackedListService) {
+            await trackedListService.applyChannelSave(saved || req.body, {
+              previousNumber: previousNumber != null ? previousNumber : req.body.number,
+            });
+          }
+        } catch (syncErr) {
+          console.error('tracked-list channel sync on update failed', syncErr.message || syncErr);
+        }
         res.send( saved || { number: req.body.number } )
       } catch(err) {
         console.error(err);
@@ -353,6 +872,13 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
     router.delete('/api/channel', async (req, res) => {
       try {
         await channelService.deleteChannel(req.body.number);
+        try {
+          if (trackedListService) {
+            await trackedListService.applyChannelDelete(req.body.number);
+          }
+        } catch (syncErr) {
+          console.error('tracked-list channel unlink on delete failed', syncErr.message || syncErr);
+        }
         res.send( { number: req.body.number} )
       } catch(err) {
         console.error(err);
@@ -398,7 +924,8 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
             });
         } else {
             const logo = req.files.image;
-            logo.mv(path.join(process.env.DATABASE, '/images/uploads/', logo.name));
+            const dbPaths = require('./database-paths');
+            logo.mv(path.join(dbPaths.imagesUploadsDir(), logo.name));
             
             res.send({
                 status: true,
@@ -425,6 +952,8 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
       if (!rows || rows.length === 0) {
         let doc = {
           disabledLibraries: [],
+          fillerLibraries: [],
+          hiddenLibraries: [],
           autoSyncHours: 0,
           lastGlobalSyncAt: null,
           librarySync: {},
@@ -435,6 +964,12 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
       let doc = rows[0];
       if (!Array.isArray(doc.disabledLibraries)) {
         doc.disabledLibraries = [];
+      }
+      if (!Array.isArray(doc.fillerLibraries)) {
+        doc.fillerLibraries = [];
+      }
+      if (!Array.isArray(doc.hiddenLibraries)) {
+        doc.hiddenLibraries = [];
       }
       return doc;
     }
@@ -447,6 +982,8 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
           : { autoSyncHours: doc.autoSyncHours || 0, lastGlobalSyncAt: doc.lastGlobalSyncAt || null, librarySync: doc.librarySync || {}, syncing: [] };
         res.send({
           disabledLibraries: doc.disabledLibraries || [],
+          fillerLibraries: doc.fillerLibraries || [],
+          hiddenLibraries: doc.hiddenLibraries || [],
           autoSyncHours: syncStatus.autoSyncHours || 0,
           lastGlobalSyncAt: syncStatus.lastGlobalSyncAt || null,
           librarySync: syncStatus.librarySync || {},
@@ -466,14 +1003,19 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
           return res.status(400).send("disabledLibraries must be an array");
         }
         // Normalize entries
-        doc.disabledLibraries = disabled.map((d) => {
-          return {
-            serverName: String(d.serverName || ""),
-            sectionKey: String(d.sectionKey || ""),
-            title: d.title ? String(d.title) : undefined,
-            type: d.type ? String(d.type) : undefined,
-          };
-        }).filter((d) => d.serverName && d.sectionKey);
+        doc.disabledLibraries = normalizeLibraryRefList(disabled);
+        if (typeof req.body.fillerLibraries !== 'undefined') {
+          if (!Array.isArray(req.body.fillerLibraries)) {
+            return res.status(400).send("fillerLibraries must be an array");
+          }
+          doc.fillerLibraries = normalizeLibraryRefList(req.body.fillerLibraries);
+        }
+        if (typeof req.body.hiddenLibraries !== 'undefined') {
+          if (!Array.isArray(req.body.hiddenLibraries)) {
+            return res.status(400).send("hiddenLibraries must be an array");
+          }
+          doc.hiddenLibraries = normalizeLibraryRefList(req.body.hiddenLibraries);
+        }
 
         if (typeof req.body.autoSyncHours !== 'undefined') {
           let n = parseFloat(req.body.autoSyncHours);
@@ -492,6 +1034,8 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
           : { autoSyncHours: doc.autoSyncHours || 0, lastGlobalSyncAt: doc.lastGlobalSyncAt || null, librarySync: doc.librarySync || {}, syncing: [] };
         res.send({
           disabledLibraries: doc.disabledLibraries,
+          fillerLibraries: doc.fillerLibraries || [],
+          hiddenLibraries: doc.hiddenLibraries || [],
           autoSyncHours: syncStatus.autoSyncHours || 0,
           lastGlobalSyncAt: syncStatus.lastGlobalSyncAt || null,
           librarySync: syncStatus.librarySync || {},
@@ -586,12 +1130,16 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
           return res.send({ sections: [], fromCache: false });
         }
         let includeDisabled = req.query.includeDisabled === '1';
+        let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
         // Only treat sections as cached when at least one library was synced
         // (playlists-only cache must not suppress live library discovery)
         let has = plexLibraryCacheService.hasLibraryCache
           ? plexLibraryCacheService.hasLibraryCache(req.params.serverName)
           : plexLibraryCacheService.hasServerCache(req.params.serverName);
-        let sections = plexLibraryCacheService.getCachedSections(req.params.serverName, { includeDisabled: includeDisabled });
+        let sections = plexLibraryCacheService.getCachedSections(req.params.serverName, {
+          includeDisabled: includeDisabled,
+          includeHidden: includeHidden,
+        });
         res.send({ sections: sections, fromCache: !!has });
       } catch (err) {
         console.error(err);
@@ -604,7 +1152,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         if (!plexLibraryCacheService) {
           return res.send({ playlists: null, fromCache: false });
         }
-        let hit = plexLibraryCacheService.getCachedPlaylistsList(req.params.serverName);
+        let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+        let hit = plexLibraryCacheService.getCachedPlaylistsList(req.params.serverName, {
+          includeHidden: includeHidden,
+        });
         res.send({ playlists: hit.list, fromCache: !!hit.fromCache });
       } catch (err) {
         console.error(err);
@@ -617,7 +1168,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         if (!plexLibraryCacheService) {
           return res.send({ collections: [], fromCache: false });
         }
-        let hit = plexLibraryCacheService.getCachedCollectionsList(req.params.serverName);
+        let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+        let hit = plexLibraryCacheService.getCachedCollectionsList(req.params.serverName, {
+          includeHidden: includeHidden,
+        });
         res.send({ collections: hit.list || [], fromCache: !!hit.fromCache });
       } catch (err) {
         console.error(err);
@@ -630,7 +1184,10 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         if (!plexLibraryCacheService) {
           return res.send({ shows: [], fromCache: false });
         }
-        let hit = plexLibraryCacheService.getCachedShowsList(req.params.serverName);
+        let includeHidden = req.query.includeHidden === '1' || req.query.includeHidden === 'true';
+        let hit = plexLibraryCacheService.getCachedShowsList(req.params.serverName, {
+          includeHidden: includeHidden,
+        });
         res.send({ shows: hit.list || [], fromCache: !!hit.fromCache });
       } catch (err) {
         console.error(err);
@@ -660,6 +1217,312 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
         console.error(err);
         res.status(500).send("error");
       }
+    });
+
+    /**
+     * Content-sources catalog (channel Properties + bulk import).
+     * Always served from local library cache + custom shows — never contacts
+     * Plex/Jellyfin live. Empty playlists/collections (count 0) are omitted.
+     */
+    router.get('/api/content-sources/catalog', async (req, res) => {
+      try {
+        function hasAddableContent(item) {
+          if (!item) return false;
+          if (Array.isArray(item.children) && item.children.length === 0) return false;
+          if (item.count === null || typeof item.count === 'undefined' || item.count === '') {
+            return true;
+          }
+          let n = parseInt(item.count, 10);
+          if (isNaN(n)) return true;
+          return n > 0;
+        }
+        function sortByTitle(list) {
+          return (list || []).slice().sort((a, b) => {
+            let ta = (a.title || a.name || '').toString();
+            let tb = (b.title || b.name || '').toString();
+            return ta.localeCompare(tb, undefined, { sensitivity: 'base', numeric: true });
+          });
+        }
+        function tagList(items, serverName, mediaSource, type) {
+          let out = [];
+          for (let i = 0; i < (items || []).length; i++) {
+            let src = items[i];
+            if (!hasAddableContent(src)) continue;
+            let row = Object.assign({}, src);
+            delete row.children;
+            row.type = row.type || type;
+            row.serverName = serverName;
+            row.mediaSource = mediaSource;
+            row.source = mediaSource;
+            row.serverType = mediaSource;
+            out.push(row);
+          }
+          return out;
+        }
+
+        let lists = [];
+        let shows = [];
+        let warnings = [];
+        let serverStatus = [];
+
+        let plexServers = [];
+        try {
+          plexServers = db['plex-servers'].find() || [];
+        } catch (e) {
+          plexServers = [];
+        }
+        for (let s = 0; s < plexServers.length; s++) {
+          let server = plexServers[s];
+          let name = server.name;
+          let st = {
+            name: name,
+            mediaSource: 'plex',
+            playlistsFromCache: false,
+            collectionsFromCache: false,
+            showsFromCache: false,
+          };
+          if (plexLibraryCacheService) {
+            let pl = plexLibraryCacheService.getCachedPlaylistsList(name);
+            let col = plexLibraryCacheService.getCachedCollectionsList(name);
+            let sh = plexLibraryCacheService.getCachedShowsList(name);
+            st.playlistsFromCache = !!(pl && pl.fromCache);
+            st.collectionsFromCache = !!(col && col.fromCache);
+            st.showsFromCache = !!(sh && sh.fromCache);
+            if (pl && pl.fromCache && Array.isArray(pl.list)) {
+              lists = lists.concat(tagList(pl.list, name, 'plex', 'playlist'));
+            } else {
+              warnings.push('Plex playlists not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+            if (col && col.fromCache && Array.isArray(col.list)) {
+              lists = lists.concat(tagList(col.list, name, 'plex', 'collection'));
+            } else {
+              warnings.push('Plex collections not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+            if (sh && sh.fromCache && Array.isArray(sh.list)) {
+              shows = shows.concat(tagList(sh.list, name, 'plex', 'show'));
+            } else {
+              warnings.push('Plex TV shows not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+          } else {
+            warnings.push('Plex library cache service unavailable.');
+          }
+          serverStatus.push(st);
+        }
+
+        let jfServers = [];
+        try {
+          jfServers = db['jellyfin-servers'].find() || [];
+        } catch (e) {
+          jfServers = [];
+        }
+        for (let s = 0; s < jfServers.length; s++) {
+          let server = jfServers[s];
+          let name = server.name;
+          let st = {
+            name: name,
+            mediaSource: 'jellyfin',
+            playlistsFromCache: false,
+            collectionsFromCache: false,
+            showsFromCache: false,
+          };
+          if (jellyfinLibraryCacheService) {
+            let pl = jellyfinLibraryCacheService.getCachedPlaylistsList(name);
+            let col = jellyfinLibraryCacheService.getCachedCollectionsList(name);
+            let sh = jellyfinLibraryCacheService.getCachedShowsList(name);
+            st.playlistsFromCache = !!(pl && pl.fromCache);
+            st.collectionsFromCache = !!(col && col.fromCache);
+            st.showsFromCache = !!(sh && sh.fromCache);
+            if (pl && pl.fromCache && Array.isArray(pl.list)) {
+              lists = lists.concat(tagList(pl.list, name, 'jellyfin', 'playlist'));
+            } else {
+              warnings.push('Jellyfin playlists not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+            if (col && col.fromCache && Array.isArray(col.list)) {
+              lists = lists.concat(tagList(col.list, name, 'jellyfin', 'collection'));
+            } else {
+              warnings.push('Jellyfin collections not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+            if (sh && sh.fromCache && Array.isArray(sh.list)) {
+              shows = shows.concat(tagList(sh.list, name, 'jellyfin', 'show'));
+            } else {
+              warnings.push('Jellyfin TV shows not in cache for "' + name + '" — sync library cache in Library Management.');
+            }
+          } else {
+            warnings.push('Jellyfin library cache service unavailable.');
+          }
+          serverStatus.push(st);
+        }
+
+        let customShows = [];
+        try {
+          let customs = await customShowDB.getAllShowsInfo();
+          for (let i = 0; i < (customs || []).length; i++) {
+            let cs = customs[i];
+            customShows.push({
+              type: 'custom',
+              key: cs.id,
+              title: cs.name,
+              name: cs.name,
+              count: cs.count,
+              serverName: '',
+              mediaSource: 'custom',
+              source: 'custom',
+              serverType: 'custom',
+            });
+          }
+        } catch (err) {
+          console.error(err);
+          warnings.push('Failed to load custom programming.');
+        }
+
+        lists = sortByTitle(lists);
+        shows = sortByTitle(shows);
+        customShows = sortByTitle(customShows);
+
+        res.send({
+          lists: lists,
+          shows: shows,
+          customShows: customShows,
+          servers: serverStatus,
+          warnings: warnings,
+          fromCache: true,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).send("error");
+      }
+    });
+
+    // ---- External list import (Trakt / Letterboxd / paste) ----
+    router.get('/api/external-lists/settings', (req, res) => {
+        try {
+            res.send(externalListService.getPublicSettings());
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.put('/api/external-lists/settings', (req, res) => {
+        try {
+            let saved = externalListService.saveSettings(req.body || {});
+            res.send(Object.assign({ ok: true }, saved));
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    /**
+     * Resolve a list URL and/or pasted CSV/titles against local library cache.
+     * Body: { url?, text?, traktClientId? }
+     */
+    router.post('/api/external-lists/resolve', async (req, res) => {
+        try {
+            let result = await externalListService.resolve(req.body || {});
+            res.send(result);
+        } catch (err) {
+            console.error('external-list resolve failed', err);
+            res.status(400).send({
+                ok: false,
+                error: err.message || String(err),
+                warnings: err.warnings || [],
+                provider: err.provider || null,
+            });
+        }
+    });
+
+    // ---- Tracked lists (Library → Lists; refreshable like Radarr/Sonarr) ----
+    router.get('/api/tracked-lists', (req, res) => {
+        try {
+            res.send(trackedListService.listSummaries());
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    /** Plex libraries that can receive a playlist from Lists */
+    router.get('/api/tracked-lists/plex-libraries', (req, res) => {
+        try {
+            res.send({
+                libraries: trackedListService.listPlexLibrariesForPlaylists(),
+                hasPlex: trackedListService._hasPlexServer(),
+                hasJellyfin: trackedListService._hasJellyfinServer(),
+            });
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.get('/api/tracked-lists/:id', (req, res) => {
+        try {
+            let doc = trackedListService.get(req.params.id);
+            if (!doc) return res.status(404).send({ ok: false, error: 'List not found' });
+            res.send(doc);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.post('/api/tracked-lists', async (req, res) => {
+        try {
+            let created = await trackedListService.create(req.body || {});
+            res.status(201).send(created);
+        } catch (err) {
+            console.error('tracked-list create failed', err);
+            res.status(400).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.put('/api/tracked-lists/:id', async (req, res) => {
+        try {
+            let updated = await trackedListService.updateMeta(req.params.id, req.body || {});
+            res.send(updated);
+        } catch (err) {
+            console.error(err);
+            res.status(400).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.post('/api/tracked-lists/:id/refresh', async (req, res) => {
+        try {
+            let body = req.body || {};
+            let refreshed = await trackedListService.refresh(req.params.id, {
+                createChannel: body.createChannel === true,
+                syncChannel: body.syncChannel !== false,
+                renameChannel: body.renameChannel === true,
+                traktClientId: body.traktClientId,
+            });
+            res.send(refreshed);
+        } catch (err) {
+            console.error('tracked-list refresh failed', err);
+            res.status(400).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.post('/api/tracked-lists/refresh-all', async (req, res) => {
+        try {
+            let body = req.body || {};
+            let result = await trackedListService.refreshAll({
+                syncChannel: body.syncChannel !== false,
+            });
+            res.send(result);
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
+    });
+
+    router.delete('/api/tracked-lists/:id', async (req, res) => {
+        try {
+            res.send(await trackedListService.delete(req.params.id));
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({ ok: false, error: err.message || String(err) });
+        }
     });
 
     // Filler
@@ -895,6 +1758,102 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
 
     })
 
+    // ---- Jellyfin path / stream settings ----
+    function ensureJellyfinSettingsDoc() {
+        let rows = db['jellyfin-settings'].find();
+        if (!rows || rows.length === 0) {
+            db['jellyfin-settings'].save({
+                streamPath: 'jellyfin',
+                pathReplace: '',
+                pathReplaceWith: '',
+            });
+            rows = db['jellyfin-settings'].find();
+        }
+        let doc = rows[0];
+        if (typeof doc.streamPath === 'undefined' || !doc.streamPath) {
+            doc.streamPath = 'jellyfin';
+        }
+        if (typeof doc.pathReplace === 'undefined' || doc.pathReplace === null) {
+            doc.pathReplace = '';
+        }
+        if (typeof doc.pathReplaceWith === 'undefined' || doc.pathReplaceWith === null) {
+            doc.pathReplaceWith = '';
+        }
+        return doc;
+    }
+
+    router.get('/api/jellyfin-settings', (req, res) => {
+        try {
+            res.send(ensureJellyfinSettingsDoc());
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
+    router.put('/api/jellyfin-settings', (req, res) => {
+        try {
+            let doc = ensureJellyfinSettingsDoc();
+            let next = {
+                streamPath: (req.body && req.body.streamPath === 'direct') ? 'direct' : 'jellyfin',
+                pathReplace: (req.body && typeof req.body.pathReplace === 'string') ? req.body.pathReplace : '',
+                pathReplaceWith: (req.body && typeof req.body.pathReplaceWith === 'string') ? req.body.pathReplaceWith : '',
+            };
+            db['jellyfin-settings'].update({ _id: doc._id }, next);
+            let saved = db['jellyfin-settings'].find()[0];
+            res.send(saved);
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Jellyfin path settings updated.",
+                    "module": "jellyfin",
+                    "detail": { "action": "update" },
+                    "level": "info"
+                }
+            );
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Error updating Jellyfin configuration",
+                    "module": "jellyfin",
+                    "detail": {
+                        "action": "update",
+                        "error": safeString(err, "message"),
+                    },
+                    "level": "danger"
+                }
+            );
+        }
+    });
+
+    router.post('/api/jellyfin-settings', (req, res) => {
+        try {
+            let doc = ensureJellyfinSettingsDoc();
+            let reset = {
+                streamPath: 'jellyfin',
+                pathReplace: '',
+                pathReplaceWith: '',
+            };
+            db['jellyfin-settings'].update({ _id: doc._id }, reset);
+            res.send(db['jellyfin-settings'].find()[0]);
+            eventService.push(
+                "settings-update",
+                {
+                    "message": "Jellyfin path settings reset.",
+                    "module": "jellyfin",
+                    "detail": { "action": "reset" },
+                    "level": "warning"
+                }
+            );
+        } catch (err) {
+            console.error(err);
+            res.status(500).send("error");
+        }
+    });
+
     // PLEX SETTINGS
     router.get('/api/plex-settings', (req, res) => {
       try {
@@ -1073,7 +2032,7 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
             _id: req.body._id,
             cache: 12,
             refresh: 4,
-            file: process.env.DATABASE + '/xmltv.xml'
+            file: require('./database-paths').xmltvFile()
         })
         var xmltv = db['xmltv-settings'].find()[0]
         res.send(xmltv)
@@ -1431,6 +2390,107 @@ function api(db, channelService, fillerDB, customShowDB, xmltvInterval,  guideSe
       transformStream.end();
     }
 
+    // -------------------------------------------------------------------------
+    // Config export / import (zip of config/ + images/)
+    // -------------------------------------------------------------------------
+    const configTransfer = require('./services/config-transfer-service');
+
+    /**
+     * Download a zip of the current config/ and images/ directories.
+     */
+    router.get('/api/config/export', async (req, res) => {
+        let zipPath = null;
+        try {
+            let exported = await configTransfer.exportConfigZip();
+            zipPath = exported.path;
+            res.setHeader('Content-Type', 'application/zip');
+            res.setHeader(
+                'Content-Disposition',
+                'attachment; filename="' + exported.filename + '"'
+            );
+            res.setHeader('Content-Length', String(exported.bytes));
+            let stream = fs.createReadStream(zipPath);
+            stream.on('error', (err) => {
+                console.error(err);
+                if (!res.headersSent) {
+                    res.status(500).send('Failed to read export zip.');
+                }
+            });
+            stream.on('close', () => {
+                try {
+                    if (zipPath && fs.existsSync(zipPath)) {
+                        fs.unlinkSync(zipPath);
+                    }
+                } catch (e) { /* ignore temp cleanup */ }
+            });
+            stream.pipe(res);
+        } catch (err) {
+            console.error(err);
+            try {
+                if (zipPath && fs.existsSync(zipPath)) {
+                    fs.unlinkSync(zipPath);
+                }
+            } catch (e) { /* ignore */ }
+            if (!res.headersSent) {
+                res.status(500).send({
+                    message: 'Failed to export configuration.',
+                    error: err && err.message ? err.message : String(err),
+                });
+            }
+        }
+    });
+
+    /**
+     * Import a config zip. Backs up current config+images to backup/backup{ts}.zip
+     * then replaces config/ and images/ with the archive contents.
+     * Multipart field name: file
+     */
+    router.post('/api/config/import', async (req, res) => {
+        try {
+            if (!req.files || !req.files.file) {
+                return res.status(400).send({
+                    message: 'No zip file uploaded. Use form field "file".',
+                });
+            }
+            let uploaded = req.files.file;
+            let name = (uploaded.name || '').toLowerCase();
+            if (name && !name.endsWith('.zip')) {
+                return res.status(400).send({
+                    message: 'Import file must be a .zip archive.',
+                });
+            }
+            // Prefer temp path if express-fileupload wrote one; otherwise use buffer
+            let source = uploaded.tempFilePath || uploaded.data;
+            if (!source) {
+                return res.status(400).send({ message: 'Empty upload.' });
+            }
+            try {
+                let result = await configTransfer.importConfigZip(source);
+                res.send({
+                    status: true,
+                    message:
+                        'Configuration imported. A backup of the previous config was saved. ' +
+                        'Reload the page to use the new configuration.',
+                    backupFilename: result.backupFilename,
+                    backupBytes: result.backupBytes,
+                    reloadRequired: true,
+                });
+            } finally {
+                // Clean express-fileupload temp file when present
+                try {
+                    if (uploaded.tempFilePath && fs.existsSync(uploaded.tempFilePath)) {
+                        fs.unlinkSync(uploaded.tempFilePath);
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        } catch (err) {
+            console.error(err);
+            res.status(500).send({
+                message: 'Failed to import configuration.',
+                error: err && err.message ? err.message : String(err),
+            });
+        }
+    });
 
     return router
 }

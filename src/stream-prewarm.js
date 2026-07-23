@@ -20,12 +20,14 @@ const { PassThrough } = require('stream');
 /** @type {Map<string, any>} */
 const prewarms = new Map();
 
-// ~1–1.5s of typical 1080p/4K MPEG-TS — enough to hand off without a stall
-const DEFAULT_READY_MIN_BYTES = 1024 * 1024;
+// ~1.5–2s of typical 1080p MPEG-TS — enough to include PAT/PMT + first keyframe
+// before loading→program handoff (too little buffer → black video + audio only)
+const DEFAULT_READY_MIN_BYTES = 1536 * 1024;
 const DEFAULT_MAX_WAIT_MS = 45000;
 const DEFAULT_MIN_SPLASH_MS = 600;
-// After first prewarm bytes, require a short stable window before READY
-const DEFAULT_STABLE_MS = 400;
+// After first prewarm bytes, require a short stable window before READY so the
+// encoder has emitted at least one IDR (GOP is ~2s at g=48 / 24fps)
+const DEFAULT_STABLE_MS = 700;
 
 function keyOf(session, channel) {
     return String(session) + ':' + String(channel);

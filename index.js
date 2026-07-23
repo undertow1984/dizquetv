@@ -66,6 +66,8 @@ for (let i = 0, l = process.argv.length; i < l; i++) {
 process.env.DATABASE = process.env.DATABASE ||  path.join(".", ".dizquetv")
 process.env.PORT = process.env.PORT || 8000
 
+const dbPaths = require('./src/database-paths');
+
 if (!fs.existsSync(process.env.DATABASE)) {
     if (fs.existsSync(  path.join(".", ".pseudotv")  )) {
         throw Error(process.env.DATABASE + " folder not found but ./.pseudotv has been found. Please rename this folder or create an empty " + process.env.DATABASE + " folder so that the program is not confused about.");
@@ -73,29 +75,12 @@ if (!fs.existsSync(process.env.DATABASE)) {
     fs.mkdirSync(process.env.DATABASE)
 }
 
-if(!fs.existsSync(path.join(process.env.DATABASE, 'images'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'images'))
-}
-if(!fs.existsSync(path.join(process.env.DATABASE, 'channels'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'channels'))
-}
-if(!fs.existsSync(path.join(process.env.DATABASE, 'filler'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'filler'))
-}
-if(!fs.existsSync(path.join(process.env.DATABASE, 'custom-shows'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'custom-shows'))
-}
-if(!fs.existsSync(path.join(process.env.DATABASE, 'cache'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'cache'))
-}
-if(!fs.existsSync(path.join(process.env.DATABASE, 'cache','images'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'cache','images'))
-}
+// Reorganize legacy layout (config/, cache/*-cache, images/channel-logos) then ensure dirs
+dbPaths.migrateLayout();
 
+channelDB = new ChannelDB( dbPaths.channelsDir() );
 
-channelDB = new ChannelDB( path.join(process.env.DATABASE, 'channels') );
-
-db.connect(process.env.DATABASE, ['channels', 'plex-servers', 'ffmpeg-settings', 'plex-settings', 'xmltv-settings', 'hdhr-settings', 'imagemagick-settings', 'db-version', 'client-id', 'cache-images', 'settings', 'plex-library-settings'])
+dbPaths.connectDiskDb(db);
 
 let fontAwesome = "fontawesome-free-5.15.4-web";
 let bootstrap = "bootstrap-4.4.1-dist";
@@ -103,14 +88,16 @@ initDB(db, channelDB)
 
 channelService = new ChannelService(channelDB, db);
 
-fillerDB = new FillerDB( path.join(process.env.DATABASE, 'filler') , channelService );
-customShowDB = new CustomShowDB( path.join(process.env.DATABASE, 'custom-shows') );
-let programPlayTimeDB = new ProgramPlayTimeDB( path.join(process.env.DATABASE, 'play-cache') );
+fillerDB = new FillerDB( dbPaths.fillerDir() , channelService );
+customShowDB = new CustomShowDB( dbPaths.customShowsDir() );
+let programPlayTimeDB = new ProgramPlayTimeDB( dbPaths.playCacheDir() );
 let ffmpegSettingsService = new FfmpegSettingsService(db, unlockPath);
 const ImageMagickSettingsService = require('./src/services/imagemagick-settings-service');
 let imagemagickSettingsService = new ImageMagickSettingsService(db);
 const PlexLibraryCacheService = require('./src/services/plex-library-cache-service');
 let plexLibraryCacheService = new PlexLibraryCacheService(db);
+const JellyfinLibraryCacheService = require('./src/services/jellyfin-library-cache-service');
+let jellyfinLibraryCacheService = new JellyfinLibraryCacheService(db);
 
 async function initializeProgramPlayTimeDB() {
     try {
@@ -124,7 +111,7 @@ async function initializeProgramPlayTimeDB() {
 }
 initializeProgramPlayTimeDB();
 
-fileCache = new FileCacheService( path.join(process.env.DATABASE, 'cache') );
+fileCache = new FileCacheService( dbPaths.cacheDir() );
 cacheImageService = new CacheImageService(db, fileCache);
 m3uService = new M3uService(fileCache, channelService, db)
 
@@ -262,7 +249,11 @@ app.use(
 );
 
 app.use(fileUpload({
-    createParentPath: true
+    createParentPath: true,
+    // Config import zips can be large (logos / uploads); use temp files + high limit
+    useTempFiles: true,
+    tempFileDir: require('os').tmpdir(),
+    limits: { fileSize: 512 * 1024 * 1024 },
 }));
 app.use(bodyParser.json({limit: '50mb'}))
 
@@ -290,30 +281,28 @@ const logoStaticOptions = {
         res.set('Access-Control-Allow-Origin', '*');
     }
 };
-app.use('/images', express.static(path.join(process.env.DATABASE, 'images'), logoStaticOptions))
+app.use('/images', express.static(dbPaths.imagesDir(), logoStaticOptions))
 app.use(express.static(path.join(__dirname, 'web','public')))
-app.use('/images', express.static(path.join(process.env.DATABASE, 'images'), logoStaticOptions))
+app.use('/images', express.static(dbPaths.imagesDir(), logoStaticOptions))
 app.use('/cache/images', cacheImageService.routerInterceptor())
-app.use('/cache/images', express.static(path.join(process.env.DATABASE, 'cache','images'), logoStaticOptions))
-// Dynamic channel logos generated from PSD template (transparent PNGs)
-if (!fs.existsSync(path.join(process.env.DATABASE, 'cache', 'channel-logos'))) {
-    fs.mkdirSync(path.join(process.env.DATABASE, 'cache', 'channel-logos'), { recursive: true });
-}
-// Dynamic logos change on each channel Update — avoid long browser cache
+app.use('/cache/images', express.static(dbPaths.cacheImagesDir(), logoStaticOptions))
+// Dynamic channel logos (images/channel-logos); legacy URL /cache/channel-logos still served.
+// Short cache + revalidate so EPG clients (Jellyfin) pick up logo file changes when ?v= changes.
 const channelLogoStaticOptions = {
     setHeaders: (res) => {
-        res.set('Cache-Control', 'public, max-age=60, must-revalidate');
+        res.set('Cache-Control', 'public, max-age=0, must-revalidate');
         res.set('Access-Control-Allow-Origin', '*');
     }
 };
-app.use('/cache/channel-logos', express.static(path.join(process.env.DATABASE, 'cache', 'channel-logos'), channelLogoStaticOptions))
+app.use('/images/channel-logos', express.static(dbPaths.channelLogosDir(), channelLogoStaticOptions))
+app.use('/cache/channel-logos', express.static(dbPaths.channelLogosDir(), channelLogoStaticOptions))
 app.use('/favicon.svg', express.static(
     path.join(__dirname, 'resources','favicon.svg')
 ) );
 app.use('/custom.css', express.static(path.join(process.env.DATABASE, 'custom.css')))
 
 // API Routers
-app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService))
+app.use(api.router(db, channelService, fillerDB, customShowDB, xmltvInterval, guideService, m3uService, eventService, ffmpegSettingsService, plexLibraryCacheService, imagemagickSettingsService, jellyfinLibraryCacheService))
 app.use('/api/cache/images', cacheImageService.apiRouters())
 app.use('/' + fontAwesome, express.static(path.join(process.env.DATABASE, fontAwesome)))
 app.use('/' + bootstrap, express.static(path.join(process.env.DATABASE, bootstrap)))
@@ -333,10 +322,10 @@ function initDB(db, channelDB) {
         let data = fs.readFileSync(path.resolve(path.join(__dirname, 'resources/dizquetv.png')))
         fs.writeFileSync(process.env.DATABASE + '/images/dizquetv.png', data)
     }
-    // Deploy Plex channel-logo PSD templates into the data folder (user-editable copies)
+    // Deploy Plex channel-logo PSD templates under images/ (user-editable copies)
     // Plex-Template.psd = 1-word names; Plex-Template-Two.psd = 2+ word names
-    ;['Plex-Template.psd', 'Plex-Template-Two.psd'].forEach(function (fname) {
-        let dest = path.join(process.env.DATABASE, fname);
+    dbPaths.PLEX_TEMPLATE_FILES.forEach(function (fname) {
+        let dest = dbPaths.plexTemplateFile(fname);
         let src = path.resolve(path.join(__dirname, 'resources', fname));
         if (fs.existsSync(src) && !fs.existsSync(dest)) {
             fs.copyFileSync(src, dest);

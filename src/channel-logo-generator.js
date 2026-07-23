@@ -22,9 +22,14 @@ const TEMPLATE_ONE_FILENAME = 'Plex-Template.psd';
 const TEMPLATE_TWO_FILENAME = 'Plex-Template-Two.psd';
 /** @deprecated alias */
 const TEMPLATE_FILENAME = TEMPLATE_ONE_FILENAME;
-const CACHE_SUBDIR = path.join('cache', 'channel-logos');
+const CACHE_SUBDIR = path.join('images', 'channel-logos');
 /** Bump when generator output format/layout changes (invalidates cache). */
-const GENERATOR_VERSION = '4';
+const GENERATOR_VERSION = '5';
+
+/** Paths that failed ImageMagick open this process (avoid repeated bad opens). */
+const _unreadablePsds = new Set();
+/** Filenames known unreadable even from resources (e.g. Template-Two on IM7). */
+const _unreadableTemplateNames = new Set();
 
 let _magickChecked = false;
 let _magickPath = null;
@@ -42,45 +47,157 @@ function databaseRoot() {
         : path.join(projectRoot(), '.dizquetv');
 }
 
+function templatesDir() {
+    try {
+        const dbPaths = require('./database-paths');
+        return dbPaths.imagesDir();
+    } catch (e) {
+        return path.join(databaseRoot(), 'images');
+    }
+}
+
 function defaultTemplatePath(filename) {
     filename = filename || TEMPLATE_ONE_FILENAME;
-    let inDb = path.join(databaseRoot(), filename);
-    if (fs.existsSync(inDb)) {
-        return inDb;
+    // Preferred: images/<template>
+    let inImages = path.join(templatesDir(), filename);
+    if (fs.existsSync(inImages)) {
+        return inImages;
+    }
+    // Legacy: DATABASE root
+    let inRoot = path.join(databaseRoot(), filename);
+    if (fs.existsSync(inRoot)) {
+        return inRoot;
     }
     let bundled = path.resolve(path.join(projectRoot(), 'resources', filename));
     if (fs.existsSync(bundled)) {
         return bundled;
     }
-    return inDb;
+    return inImages;
 }
 
 /**
- * Ensure a named PSD exists under the data folder (copy from resources if needed).
+ * True if ImageMagick can open this PSD (layer 0). Some bundled PSDs are
+ * unreadable by modern ImageMagick ("improper image header").
+ */
+function isReadablePsd(psdPath) {
+    if (!psdPath || !fs.existsSync(psdPath)) {
+        return false;
+    }
+    let key = path.resolve(psdPath);
+    if (_unreadablePsds.has(key)) {
+        return false;
+    }
+    // Need magick available; if not, assume path is ok and let generate fail later
+    if (!findMagick()) {
+        return true;
+    }
+    let r = magickRun([imPath(psdPath) + '[0]', '-format', '%w', 'info:'], 10000);
+    if (r.ok && parseInt(String(r.stdout).trim(), 10) > 0) {
+        return true;
+    }
+    _unreadablePsds.add(key);
+    console.error(
+        'dizqueTV channel-logo: PSD unreadable by ImageMagick: ' + psdPath +
+        (r.error ? (' — ' + r.error) : '')
+    );
+    return false;
+}
+
+/**
+ * Ensure a named PSD exists under images/ (copy from resources if needed).
+ * Re-copies from resources when the deployed file exists but is unreadable.
  * @param {string} [filename]
+ * @returns {string|null} absolute path to a readable PSD, or null
  */
 function ensureTemplateDeployed(filename) {
     filename = filename || TEMPLATE_ONE_FILENAME;
-    let dest = path.join(databaseRoot(), filename);
-    if (fs.existsSync(dest)) {
-        return dest;
-    }
-    let src = path.resolve(path.join(projectRoot(), 'resources', filename));
-    if (!fs.existsSync(src)) {
+    if (_unreadableTemplateNames.has(filename)) {
         return null;
     }
-    try {
-        let dir = path.dirname(dest);
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+    let dest = path.join(templatesDir(), filename);
+    let src = path.resolve(path.join(projectRoot(), 'resources', filename));
+    // Also try parent resources when running from dist/
+    if (!fs.existsSync(src)) {
+        let alt = path.resolve(path.join(projectRoot(), '..', 'resources', filename));
+        if (fs.existsSync(alt)) {
+            src = alt;
         }
-        fs.copyFileSync(src, dest);
-        console.log('dizqueTV channel-logo: deployed ' + filename + ' → ' + dest);
-        return dest;
-    } catch (e) {
-        console.error('dizqueTV channel-logo: failed to deploy ' + filename, e.message || e);
-        return fs.existsSync(src) ? src : null;
     }
+
+    function tryPath(p) {
+        if (p && fs.existsSync(p) && isReadablePsd(p)) {
+            return p;
+        }
+        return null;
+    }
+
+    // Prefer readable deployed copy
+    let ok = tryPath(dest);
+    if (ok) {
+        return ok;
+    }
+
+    // Move legacy root copy into images/ if readable
+    let legacy = path.join(databaseRoot(), filename);
+    if (fs.existsSync(legacy) && isReadablePsd(legacy)) {
+        try {
+            let dir = path.dirname(dest);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.copyFileSync(legacy, dest);
+            console.log('dizqueTV channel-logo: deployed legacy ' + filename + ' → ' + dest);
+            _unreadablePsds.delete(path.resolve(dest));
+            if (isReadablePsd(dest)) {
+                return dest;
+            }
+        } catch (e) {
+            if (isReadablePsd(legacy)) {
+                return legacy;
+            }
+        }
+    }
+
+    // Copy from resources once (overwrite corrupt deployed file)
+    if (fs.existsSync(src)) {
+        try {
+            let dir = path.dirname(dest);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            // Only re-copy if dest missing or different size
+            let needCopy = !fs.existsSync(dest);
+            if (!needCopy) {
+                try {
+                    needCopy = fs.statSync(dest).size !== fs.statSync(src).size;
+                } catch (e) {
+                    needCopy = true;
+                }
+            }
+            if (needCopy) {
+                fs.copyFileSync(src, dest);
+                _unreadablePsds.delete(path.resolve(dest));
+                console.log('dizqueTV channel-logo: deployed ' + filename + ' → ' + dest);
+            }
+            if (isReadablePsd(dest)) {
+                return dest;
+            }
+            if (isReadablePsd(src)) {
+                return src;
+            }
+            _unreadableTemplateNames.add(filename);
+            console.error(
+                'dizqueTV channel-logo: ' + filename +
+                ' is unreadable by ImageMagick. Multi-word names fall back to Plex-Template.psd.'
+            );
+            return null;
+        } catch (e) {
+            console.error('dizqueTV channel-logo: failed to deploy ' + filename, e.message || e);
+            return isReadablePsd(src) ? src : null;
+        }
+    }
+
+    return null;
 }
 
 /** Deploy both one-word and two-word templates. */
@@ -99,17 +216,21 @@ function resolveTemplatePath(configured, defaultFilename) {
     defaultFilename = defaultFilename || TEMPLATE_ONE_FILENAME;
     if (configured && String(configured).trim()) {
         let p = path.resolve(String(configured).trim());
-        if (fs.existsSync(p)) {
+        if (fs.existsSync(p) && isReadablePsd(p)) {
             return p;
         }
-        console.error('dizqueTV channel-logo: configured template not found: ' + p);
+        if (fs.existsSync(p)) {
+            console.error('dizqueTV channel-logo: configured template unreadable: ' + p);
+        } else {
+            console.error('dizqueTV channel-logo: configured template not found: ' + p);
+        }
     }
     let deployed = ensureTemplateDeployed(defaultFilename);
-    if (deployed && fs.existsSync(deployed)) {
+    if (deployed && isReadablePsd(deployed)) {
         return deployed;
     }
     let def = defaultTemplatePath(defaultFilename);
-    return fs.existsSync(def) ? def : null;
+    return (fs.existsSync(def) && isReadablePsd(def)) ? def : null;
 }
 
 function countChannelNameWords(name) {
@@ -120,25 +241,48 @@ function countChannelNameWords(name) {
 }
 
 /**
- * 1 word → Plex-Template.psd; 2+ words → Plex-Template-Two.psd
+ * 1 word → Plex-Template.psd; 2+ words → Plex-Template-Two.psd when readable.
+ * If Template-Two is missing/corrupt (common with IM7), fall back to Template-One
+ * but keep multi-line name layout under the PLEX art.
  */
 function pickTemplateForChannelName(opts) {
     opts = opts || {};
     let words = countChannelNameWords(opts.channelName);
-    let multi = words >= 2;
-    let pathResolved = multi
-        ? resolveTemplatePath(opts.templateTwoPath, TEMPLATE_TWO_FILENAME)
-        : resolveTemplatePath(opts.templatePath, TEMPLATE_ONE_FILENAME);
-    if (!pathResolved && multi) {
+    let wantMulti = words >= 2 && opts.forceOneWordTemplate !== true;
+    let pathResolved = null;
+    let multiLine = wantMulti;
+    let filename = wantMulti ? TEMPLATE_TWO_FILENAME : TEMPLATE_ONE_FILENAME;
+
+    if (wantMulti) {
+        pathResolved = resolveTemplatePath(opts.templateTwoPath, TEMPLATE_TWO_FILENAME);
+        if (!pathResolved) {
+            pathResolved = resolveTemplatePath(opts.templatePath, TEMPLATE_ONE_FILENAME);
+            filename = TEMPLATE_ONE_FILENAME;
+            // Still split the name onto 2 lines under PLEX even on the one-word canvas
+            multiLine = true;
+            console.log(
+                'dizqueTV channel-logo: Plex-Template-Two.psd unavailable/unreadable; ' +
+                'using Plex-Template.psd with multi-line channel name'
+            );
+        }
+    } else {
         pathResolved = resolveTemplatePath(opts.templatePath, TEMPLATE_ONE_FILENAME);
-        console.log('dizqueTV channel-logo: two-word template missing; falling back to one-word PSD');
-        multi = false;
+        multiLine = words >= 2; // multi-word names still stack lines on Template-One
+        filename = TEMPLATE_ONE_FILENAME;
     }
+
+    // Last resort: any readable one-word template
+    if (!pathResolved) {
+        pathResolved = resolveTemplatePath('', TEMPLATE_ONE_FILENAME);
+        filename = TEMPLATE_ONE_FILENAME;
+        multiLine = words >= 2;
+    }
+
     return {
         path: pathResolved,
-        multiLine: multi,
+        multiLine: multiLine,
         wordCount: words,
-        filename: multi ? TEMPLATE_TWO_FILENAME : TEMPLATE_ONE_FILENAME,
+        filename: filename,
     };
 }
 
@@ -716,7 +860,7 @@ function extractLayerPng(templatePath, layerIndex, destPng) {
 
 /**
  * Generate transparent PNG: PSD PLEX art + channel name below it (barely smaller than PLEX).
- * Stable path per channel: /cache/channel-logos/ch{N}-logo.png
+ * Stable path per channel: /images/channel-logos/ch{N}-logo.png
  */
 function generateChannelLogo(opts) {
     opts = opts || {};
@@ -726,10 +870,11 @@ function generateChannelLogo(opts) {
         channelName: opts.channelName,
         templatePath: opts.templatePath,
         templateTwoPath: opts.templateTwoPath,
+        forceOneWordTemplate: opts.forceOneWordTemplate === true,
     });
     let templatePath = picked.path;
-    if (!templatePath) {
-        console.error('dizqueTV channel-logo: no template PSD available');
+    if (!templatePath || !isReadablePsd(templatePath)) {
+        console.error('dizqueTV channel-logo: no readable template PSD available');
         return null;
     }
     console.log(
@@ -753,7 +898,7 @@ function generateChannelLogo(opts) {
     // Stable filename so the channel.icon field stays predictable after Update
     let outName = 'ch' + chNum + '-logo.png';
     let outPath = path.join(cacheDir(), outName);
-    let urlPath = '/cache/channel-logos/' + outName;
+    let urlPath = '/images/channel-logos/' + outName;
 
     if (!opts.force && fs.existsSync(outPath) && fs.statSync(outPath).size > 500) {
         return { path: outPath, urlPath: urlPath };
@@ -839,10 +984,10 @@ function generateChannelLogo(opts) {
         }
     }
 
-    // Line boxes for annotate
+    // Line boxes for annotate — channel name under PLEX art, matching PLEX weight/size
     let lineBoxes = [];
     if (picked.multiLine && lines.length >= 2 && meta.textBoxes && meta.textBoxes.length >= 2) {
-        // Use PSD sample text layer positions (top line then bottom line)
+        // Use PSD sample text layer positions (top line then bottom line) from Template-Two
         for (let li = 0; li < lines.length; li++) {
             let box = meta.textBoxes[Math.min(li, meta.textBoxes.length - 1)];
             lineBoxes.push({
@@ -851,6 +996,20 @@ function generateChannelLogo(opts) {
                 y: box.y,
                 w: meta.canvasW - 80,
                 h: box.h,
+            });
+        }
+    } else if (picked.multiLine && lines.length >= 2) {
+        // Template-One fallback: stack lines under PLEX with consistent sizing
+        let gap = Math.max(12, Math.round(plexLetterH * 0.06));
+        let lineH = Math.round(pointSize * 1.15);
+        let y0 = plexBottom + gap;
+        for (let li = 0; li < lines.length; li++) {
+            lineBoxes.push({
+                text: lines[li],
+                x: 40,
+                y: y0 + li * lineH,
+                w: meta.canvasW - 80,
+                h: lineH,
             });
         }
     } else {
@@ -1016,6 +1175,9 @@ function shouldGenerateForIcon(icon) {
     if (/\/cache\/channel-logos\//i.test(s)) {
         return true;
     }
+    if (/\/images\/channel-logos\//i.test(s)) {
+        return true;
+    }
     return false;
 }
 
@@ -1047,22 +1209,49 @@ function applyDynamicLogoOnChannelSave(channel, ffmpegSettings) {
         return channel;
     }
 
-    let generated = generateChannelLogo({
-        channelName: channel.name || ('Channel ' + channel.number),
+    // Ensure ImageMagick settings are applied (empty path = PATH auto-detect)
+    try {
+        if (typeof ffmpegSettings.magickPath === 'string') {
+            configureMagick(ffmpegSettings.magickPath);
+        }
+    } catch (e) { /* ignore */ }
+
+    let name = channel.name || ('Channel ' + channel.number);
+    let logoOpts = {
+        channelName: name,
         channelNumber: channel.number,
         templatePath: ffmpegSettings.channelLogoTemplatePath || '',
         templateTwoPath: ffmpegSettings.channelLogoTemplateTwoPath || '',
         force: true,
-    });
+    };
+    let generated = generateChannelLogo(logoOpts);
+    // Hard retry with Template-One only if first pass failed (corrupt Template-Two, etc.)
+    if (!generated || !generated.urlPath) {
+        console.warn(
+            'dizqueTV channel-logo: primary generate failed for ch' + channel.number +
+            '; retrying with Plex-Template.psd only'
+        );
+        generated = generateChannelLogo(Object.assign({}, logoOpts, {
+            forceOneWordTemplate: true,
+        }));
+    }
     if (!generated || !generated.urlPath) {
         console.error(
-            'dizqueTV channel-logo: failed to generate on save for ch' + channel.number
+            'dizqueTV channel-logo: failed to generate on save for ch' + channel.number +
+            ' — leaving icon unchanged (do not replace with stock dizquetv.png)'
         );
         return channel;
     }
 
-    // Cache-bust query so the channel settings preview reloads after Update
-    let iconUrl = generated.urlPath + '?v=' + Date.now();
+    // Cache-bust query so the channel settings preview and EPG clients reload after Update.
+    // Prefer file mtime so XMLTV/M3U stay in sync with the on-disk image across guide refreshes.
+    let bust = Date.now();
+    try {
+        if (generated.path && fs.existsSync(generated.path)) {
+            bust = Math.floor(fs.statSync(generated.path).mtimeMs);
+        }
+    } catch (e) { /* keep Date.now() */ }
+    let iconUrl = generated.urlPath + '?v=' + bust;
     channel.icon = iconUrl;
     console.log(
         'dizqueTV channel-logo: set channel.icon for ch' + channel.number + ' → ' + iconUrl

@@ -1,7 +1,7 @@
 {
   "name": "dizquetv",
   "version": "1.0.0",
-  "description": "Create LiveTV channels from your Plex media",
+  "description": "Create LiveTV channels from your Plex or Jellyfin media",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -20,6 +20,7 @@
     "angular-router-browserify": "0.0.2",
     "angular-sanitize": "^1.8.2",
     "angular-vs-repeat": "2.0.13",
+    "archiver": "^5.3.2",
     "axios": "^0.21.1",
     "body-parser": "^1.19.0",
     "diskdb": "0.1.17",
@@ -37,8 +38,8 @@
     "quickselect": "2.0.0",
     "random-js": "2.1.0",
     "request": "^2.88.2",
-    "uuid": "9.0.1",
     "unzipper": "0.10.14",
+    "uuid": "9.0.1",
     "xml-writer": "^1.7.0"
   },
   "bin": "dist/index.js",

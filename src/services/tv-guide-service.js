@@ -56,19 +56,8 @@ class TVGuideService extends events.EventEmitter
                 this.currentUpdate = this.updateTime;
                 this.currentLimit = this.updateLimit;
                 this.currentChannels = this.updateChannels;
-                let t = "" + ( (new Date()) );
-                eventService.push(
-                    "xmltv",
-                    {
-                        "message": `Started building tv-guide at = ${t}`,
-                        "module" : "xmltv",
-                        "detail" : {
-                            "time": new Date(),
-                        },
-                        "level" : "info"
-                    }
-                );
-        
+                // Only notify once when the guide finishes (see refreshXML).
+                // A second "started building" toast made every guide update appear twice.
                 await this.buildIt();
             }
         }

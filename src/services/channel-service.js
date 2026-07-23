@@ -20,20 +20,32 @@ class ChannelService extends events.EventEmitter {
     }
 
     async saveChannel(number, channelJson, options) {
-        
+        options = options || {};
         let channel = cleanUpChannel(channelJson);
 
         // Dynamic PSD logos: generate PNG on channel Update and fill channel.icon
-        try {
-            let ffmpegSettings = null;
-            if (this.db && this.db['ffmpeg-settings']) {
-                ffmpegSettings = this.db['ffmpeg-settings'].find()[0];
+        // skipDynamicLogo: bulk fixups (server edit) must not regenerate every channel logo
+        if (options.skipDynamicLogo !== true) {
+            try {
+                let ffmpegSettings = null;
+                if (this.db && this.db['ffmpeg-settings']) {
+                    ffmpegSettings = this.db['ffmpeg-settings'].find()[0];
+                }
+                if (ffmpegSettings && ffmpegSettings.enableDynamicChannelLogos === true) {
+                    // Apply ImageMagick path from settings DB if available
+                    try {
+                        if (this.db && this.db['imagemagick-settings']) {
+                            let im = this.db['imagemagick-settings'].find()[0];
+                            if (im) {
+                                logoGen.configureMagick(im.magickPath || '');
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                    logoGen.applyDynamicLogoOnChannelSave(channel, ffmpegSettings);
+                }
+            } catch (logoErr) {
+                console.error('dizqueTV: dynamic logo on channel save failed', logoErr.message || logoErr);
             }
-            if (ffmpegSettings && ffmpegSettings.enableDynamicChannelLogos === true) {
-                logoGen.applyDynamicLogoOnChannelSave(channel, ffmpegSettings);
-            }
-        } catch (logoErr) {
-            console.error('dizqueTV: dynamic logo on channel save failed', logoErr.message || logoErr);
         }
 
         let ignoreOnDemand = true;

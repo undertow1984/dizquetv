@@ -51,9 +51,14 @@ function subtitleCodecToExt(codec) {
 }
 
 function getCacheRoot() {
-    let base = process.env.DATABASE || process.cwd();
     // Always absolute so FFmpeg on Windows can open the output path reliably
-    return path.resolve(path.join(base, 'cache', 'subtitles'));
+    try {
+        const dbPaths = require('./database-paths');
+        return path.resolve(dbPaths.subtitlesCacheDir());
+    } catch (e) {
+        let base = process.env.DATABASE || process.cwd();
+        return path.resolve(path.join(base, 'cache', 'subtitles'));
+    }
 }
 
 function cachePathFor(cacheKey, streamIndex, codec) {

@@ -19,8 +19,9 @@
  ***/
 const path = require('path');
 var fs = require('fs');
+const dbPaths = require('./database-paths');
 
-const TARGET_VERSION = 806;
+const TARGET_VERSION = 807;
 const DAY_MS = 1000 * 60 * 60 * 24;
 
 const STEPS = [
@@ -47,6 +48,7 @@ const STEPS = [
     [    803,    805, (db) => addFFMpegLock(db) ],
     [    804,    805, (db) => addFFMpegLock(db) ],
     [    805,    806, (db) => addImageMagickSettings(db) ],
+    [    806,    807, (db) => addJellyfinSettings(db) ],
 ]
 
 const { v4: uuidv4 } = require('uuid');
@@ -135,7 +137,7 @@ function basicDB(db) {
         db['xmltv-settings'].save({
             cache: 12,
             refresh: 4,
-            file: `${process.env.DATABASE}/xmltv.xml`
+            file: dbPaths.xmltvFile()
         })
     }
     let hdhrSettings = db['hdhr-settings'].find()
@@ -166,6 +168,47 @@ function addImageMagickSettings(db) {
         }
     } catch (e) {
         console.error('dizqueTV: addImageMagickSettings failed', e.message || e);
+    }
+}
+
+function defaultJellyfinSettings() {
+    return {
+        streamPath: 'jellyfin', // 'jellyfin' = HTTP stream | 'direct' = local file path
+        pathReplace: '',
+        pathReplaceWith: '',
+    };
+}
+
+function addJellyfinSettings(db) {
+    try {
+        if (!db['jellyfin-settings']) {
+            return;
+        }
+        let rows = db['jellyfin-settings'].find();
+        if (!rows || rows.length === 0) {
+            db['jellyfin-settings'].save(defaultJellyfinSettings());
+            console.log('dizqueTV: created jellyfin-settings (network stream + path replace)');
+        } else {
+            let doc = rows[0];
+            let changed = false;
+            if (typeof doc.streamPath === 'undefined' || doc.streamPath === null || doc.streamPath === '') {
+                doc.streamPath = 'jellyfin';
+                changed = true;
+            }
+            if (typeof doc.pathReplace === 'undefined' || doc.pathReplace === null) {
+                doc.pathReplace = '';
+                changed = true;
+            }
+            if (typeof doc.pathReplaceWith === 'undefined' || doc.pathReplaceWith === null) {
+                doc.pathReplaceWith = '';
+                changed = true;
+            }
+            if (changed) {
+                db['jellyfin-settings'].update({ _id: doc._id }, doc);
+            }
+        }
+    } catch (e) {
+        console.error('dizqueTV: addJellyfinSettings failed', e.message || e);
     }
 }
 
@@ -438,9 +481,9 @@ function ffmpeg() {
         enableChannelWatermarkGlobally: false,
         // When watermark/icon image path is empty, render channel name into Plex templates
         enableDynamicChannelLogos: false,
-        // 1-word names; empty = .dizquetv/Plex-Template.psd (from resources)
+        // 1-word names; empty = .dizquetv/images/Plex-Template.psd (from resources)
         channelLogoTemplatePath: "",
-        // 2+ word names; empty = .dizquetv/Plex-Template-Two.psd (from resources)
+        // 2+ word names; empty = .dizquetv/images/Plex-Template-Two.psd (from resources)
         channelLogoTemplateTwoPath: "",
         // Skip loading splash + black interlude frames between programs
         disablePreludes: false,
@@ -679,15 +722,15 @@ function fixCorruptedServer(db) {
     }
     if (badFound) {
         console.log("Fixing the plex-server.json...");
-        let f = path.join(process.env.DATABASE, `plex-servers.json` );
+        let f = path.join(dbPaths.configDir(), `plex-servers.json` );
         fs.writeFileSync( f, JSON.stringify(servers) );
     }
 }
 
 function extractFillersFromChannels() {
     console.log("Extracting fillers from channels...");
-    let channels = path.join(process.env.DATABASE, 'channels');
-    let fillers = path.join(process.env.DATABASE, 'filler');
+    let channels = dbPaths.channelsDir();
+    let fillers = dbPaths.fillerDir();
     let channelFiles = fs.readdirSync(channels);
     let usedNames = {};
 
@@ -743,7 +786,7 @@ function extractFillersFromChannels() {
 
 function addFPS(db) {
     let ffmpegSettings = db['ffmpeg-settings'].find()[0];
-    let f = path.join(process.env.DATABASE, 'ffmpeg-settings.json');
+    let f = path.join(dbPaths.configDir(), 'ffmpeg-settings.json');
     ffmpegSettings.maxFPS = 60;
     fs.writeFileSync( f, JSON.stringify( [ffmpegSettings] ) );
 }
@@ -808,7 +851,7 @@ function migrateWatermark(db, channelDB) {
     }
 
     console.log("Migrating watermarks...");
-    let channels = path.join(process.env.DATABASE, 'channels');
+    let channels = dbPaths.channelsDir();
     let channelFiles = fs.readdirSync(channels);
     for (let i = 0; i < channelFiles.length; i++) {
         if (path.extname( channelFiles[i] ) === '.json') {
@@ -824,14 +867,14 @@ function migrateWatermark(db, channelDB) {
 
 function addScalingAlgorithm(db) {
     let ffmpegSettings = db['ffmpeg-settings'].find()[0];
-    let f = path.join(process.env.DATABASE, 'ffmpeg-settings.json');
+    let f = path.join(dbPaths.configDir(), 'ffmpeg-settings.json');
     ffmpegSettings.scalingAlgorithm = "bicubic";
     fs.writeFileSync( f, JSON.stringify( [ffmpegSettings] ) );
 }
 
 function addFFMpegLock(db) {
     let ffmpegSettings = db['ffmpeg-settings'].find()[0];
-    let f = path.join(process.env.DATABASE, 'ffmpeg-settings.json');
+    let f = path.join(dbPaths.configDir(), 'ffmpeg-settings.json');
     if ( typeof(ffmpegSettings.ffmpegPathLockDate) === 'undefined' || ffmpegSettings.ffmpegPathLockDate == null ) {
 
         console.log("Adding ffmpeg lock. For your security it will not be possible to modify the ffmpeg path using the UI anymore unless you launch dizquetv by following special instructions..");
@@ -878,14 +921,14 @@ function reAddIcon(dir) {
 
 function addDeinterlaceFilter(db) {
     let ffmpegSettings = db['ffmpeg-settings'].find()[0];
-    let f = path.join(process.env.DATABASE, 'ffmpeg-settings.json');
+    let f = path.join(dbPaths.configDir(), 'ffmpeg-settings.json');
     ffmpegSettings.deinterlaceFilter = "none";
     fs.writeFileSync( f, JSON.stringify( [ffmpegSettings] ) );
 }
 
 function addImageCache(db) {
     let xmltvSettings = db['xmltv-settings'].find()[0];
-    let f = path.join(process.env.DATABASE, 'xmltv-settings.json');
+    let f = path.join(dbPaths.configDir(), 'xmltv-settings.json');
     xmltvSettings.enableImageCache = false;
     fs.writeFileSync( f, JSON.stringify( [xmltvSettings] ) );
 }
@@ -898,7 +941,7 @@ function addGroupTitle() {
     }
 
     console.log("Adding group title to channels...");
-    let channels = path.join(process.env.DATABASE, 'channels');
+    let channels = dbPaths.channelsDir();
     let channelFiles = fs.readdirSync(channels);
     for (let i = 0; i < channelFiles.length; i++) {
         if (path.extname( channelFiles[i] ) === '.json') {
@@ -938,7 +981,7 @@ function fixNonIntegerDurations() {
     }
 
     console.log("Checking channels to make sure they weren't corrupted by random slots bug #350...");
-    let channels = path.join(process.env.DATABASE, 'channels');
+    let channels = dbPaths.channelsDir();
     let channelFiles = fs.readdirSync(channels);
     for (let i = 0; i < channelFiles.length; i++) {
         if (path.extname( channelFiles[i] ) === '.json') {
