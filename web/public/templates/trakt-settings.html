@@ -1,0 +1,31 @@
+<div>
+    <h5>Trakt Settings
+        <button class="pull-right btn btn-sm btn-success" style="margin-left: 5px;"
+            ng-click="updateSettings()"
+            ng-disabled="saving">
+            <span class="fa fa-spinner fa-spin" ng-show="saving"></span>
+            Update
+        </button>
+    </h5>
+    <p class="small text-muted">
+        Used by <a href="#!/lists">Library → Lists</a> to import Trakt list URLs.
+        Create a free API app at
+        <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener">trakt.tv/oauth/applications</a>
+        and paste the <strong>Client ID</strong> below.
+    </p>
+    <div class="row">
+        <div class="col-sm-8">
+            <h6>API Client ID</h6>
+            <input type="text" class="form-control form-control-sm"
+                placeholder="Trakt API client ID"
+                ng-model="settings.traktClientId"
+                ng-disabled="saving"
+                autocomplete="off" />
+            <small class="form-text text-muted">
+                You can also set the <code>TRAKT_CLIENT_ID</code> environment variable.
+            </small>
+        </div>
+    </div>
+    <div class="text-success small mt-2" ng-show="status">{{ status }}</div>
+    <div class="text-danger small mt-2" ng-show="error">{{ error }}</div>
+</div>

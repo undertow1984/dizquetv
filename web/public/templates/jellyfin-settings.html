@@ -1,0 +1,149 @@
+<div>
+    <h5>Jellyfin Servers</h5>
+    <p class="text-secondary small">
+        Add a Jellyfin server so you can build channels from its Movies and TV libraries.
+        Create an API key in Jellyfin under <strong>Dashboard → API Keys</strong>.
+        Optional User ID can be left blank (dizqueTV will pick an admin user).
+    </p>
+
+    <h6>
+        Configured servers
+    </h6>
+    <table class="table">
+        <tr>
+            <th>Name</th>
+            <th>URI</th>
+            <th>UI</th>
+            <th>Backend</th>
+            <th></th>
+        </tr>
+        <tr ng-if="servers.length === 0 && !serversPending">
+            <td colspan="5">
+                <p class="text-center text-danger">No Jellyfin servers configured yet.</p>
+            </td>
+        </tr>
+        <tr ng-if="serversPending">
+            <td colspan="5"><div class="loader"></div></td>
+        </tr>
+        <tr ng-repeat="x in servers" ng-hide="serversPending">
+            <td>{{ x.name }}</td>
+            <td><span class="text-secondary text-small">{{ x.uri }}</span></td>
+            <td>
+                <div class="loader" ng-if="x.uiStatus == 0"></div>
+                <div class="text-success" ng-if="x.uiStatus == 1"><i class="fa fa-check"></i> OK</div>
+                <div class="text-danger" ng-if="x.uiStatus == -1"><i class="fa fa-exclamation-triangle"></i> Error</div>
+            </td>
+            <td>
+                <div class="loader" ng-if="x.backendStatus == 0"></div>
+                <div class="text-success" ng-if="x.backendStatus == 1"><i class="fa fa-check"></i> OK</div>
+                <div class="text-danger" ng-if="x.backendStatus == -1"><i class="fa fa-exclamation-triangle"></i> Error</div>
+            </td>
+            <td>
+                <button class="btn btn-sm btn-outline-secondary" ng-click="editServer(x)">
+                    <span class="fa fa-edit"></span>
+                </button>
+            </td>
+        </tr>
+        <tr ng-if="serverError.length &gt; 0">
+            <td colspan="5">
+                <p class="text-center text-danger small">{{ serverError }}</p>
+            </td>
+        </tr>
+    </table>
+
+    <hr>
+    <h6>Add Jellyfin server</h6>
+    <div class="form-group">
+        <label>Name</label>
+        <input class="form-control" type="text" ng-model="newServer.name" placeholder="jellyfin">
+    </div>
+    <div class="form-group">
+        <label>Server URI</label>
+        <input class="form-control" type="text" ng-model="newServer.uri" placeholder="http://127.0.0.1:8096">
+    </div>
+    <div class="form-group">
+        <label>API Key</label>
+        <input class="form-control" type="password" ng-model="newServer.apiKey" placeholder="from Jellyfin Dashboard → API Keys">
+    </div>
+    <div class="form-group">
+        <label>User ID <span class="text-secondary small">(optional GUID)</span></label>
+        <input class="form-control" type="text" ng-model="newServer.userId" placeholder="leave blank to auto-select admin user">
+        <small class="form-text text-muted">
+            Must be the Jellyfin user <strong>GUID</strong> (not the username). Leave blank and dizqueTV will pick an admin user automatically.
+        </small>
+    </div>
+    <button class="btn btn-sm btn-success" ng-disabled="adding" ng-click="addServer()">
+        <span ng-if="!adding">Add server</span>
+        <span ng-if="adding">Checking…</span>
+    </button>
+
+    <hr>
+    <h6>
+        Stream path settings
+        <button class="pull-right btn btn-sm btn-success" style="margin-left: 5px;"
+            ng-click="updateSettings(settings)" ng-disabled="!settings">
+            Update
+        </button>
+        <button class="pull-right btn btn-sm btn-warning"
+            ng-click="resetSettings(settings)" ng-disabled="!settings">
+            Reset
+        </button>
+    </h6>
+    <p class="text-secondary small">
+        Choose how dizqueTV opens Jellyfin media. <strong>Network</strong> streams over HTTP from Jellyfin
+        (works remotely). <strong>Direct</strong> reads files from disk on this machine (faster seeks;
+        requires shared storage and optional path replacement).
+    </p>
+    <div class="row" ng-if="settings">
+        <div class="col-sm-4">
+            <div class="form-group">
+                <label>Paths</label>
+                <select class="form-control form-control-sm" ng-model="settings.streamPath"
+                    ng-options="o.id as o.description for o in pathOptions"></select>
+            </div>
+        </div>
+    </div>
+    <div class="row" ng-if="settings && settings.streamPath === 'direct'">
+        <div class="col-sm-6">
+            <h6 style="font-weight: bold">Path replacements</h6>
+            <p class="small text-muted">
+                Jellyfin reports file paths as seen on the Jellyfin host. If this machine uses a different
+                mount (e.g. <code>/media/movies</code> → <code>Z:\movies</code>), set the original prefix
+                and the local replacement.
+            </p>
+            <div class="form-group">
+                <label>Original Jellyfin path</label>
+                <input type="text" class="form-control form-control-sm"
+                    ng-model="settings.pathReplace"
+                    placeholder="e.g. /data/media or \\jellyfin\media">
+            </div>
+            <div class="form-group">
+                <label>Replace with path on this host</label>
+                <input type="text" class="form-control form-control-sm"
+                    ng-model="settings.pathReplaceWith"
+                    placeholder="e.g. Z:\media or /mnt/media">
+            </div>
+        </div>
+        <div class="col-sm-6">
+            <div class="alert alert-info small mb-0">
+                Direct mode uses the media <code>Path</code> from Jellyfin (after replacement).
+                If the file is not readable here, playback falls back to the network stream.
+                Re-sync libraries after changing paths if programs were cached without file paths.
+            </div>
+        </div>
+    </div>
+    <div class="row" ng-if="settings && settings.streamPath !== 'direct'">
+        <div class="col-sm-12">
+            <p class="text-center text-info small">
+                Network path selected — media is streamed from the Jellyfin server over HTTP.
+                Switch to <strong>Direct</strong> to use local files and path replacement.
+            </p>
+        </div>
+    </div>
+
+    <jellyfin-server-edit
+        ng-if="_serverEditorState.visible"
+        state="_serverEditorState"
+        on-finish="serverEditFinished">
+    </jellyfin-server-edit>
+</div>

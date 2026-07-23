@@ -1,0 +1,441 @@
+<div class="container">
+    <div class="lists-section">
+        <div class="lists-busy-overlay" ng-show="busy" aria-live="polite" aria-busy="true">
+            <div class="lists-busy-inner">
+                <div class="loader" aria-hidden="true"></div>
+                <div class="lists-busy-status">{{ status || 'Processing…' }}</div>
+                <div class="small text-muted mt-1">Please wait — do not start another action.</div>
+            </div>
+        </div>
+
+        <div class="d-flex align-items-center mb-2">
+            <h5 class="mb-0 flex-grow-1">
+                Lists
+                <small class="text-muted font-weight-normal ml-2">Letterboxd / Trakt / paste</small>
+            </h5>
+            <button type="button" class="btn btn-sm btn-outline-secondary mr-1"
+                ng-click="refreshAll()"
+                ng-disabled="busy || loading || lists.length === 0"
+                title="Re-fetch every list and update linked channels">
+                <span class="fa fa-sync" ng-class="{'fa-spin': busy}"></span>
+                Refresh all
+            </button>
+            <button type="button" class="btn btn-sm btn-primary"
+                ng-click="openAdd()"
+                ng-disabled="busy">
+                <span class="fa fa-plus"></span>
+                Add list
+            </button>
+        </div>
+
+        <p class="small text-muted">
+            Track external movie lists (like Radarr/Sonarr). Lists are matched against your
+            <strong>synced library cache</strong> and can push programs to a channel and/or a
+            Plex/Jellyfin playlist. Use <strong>Refresh</strong> to update channel programming and playlists.
+            Letterboxd list pages are scraped; Trakt uses the API (Client ID under
+            <a href="#!/settings#trakt">Settings → Trakt</a>). IMDB list URLs are not supported.
+            <a href="#!/library">← Library</a>
+        </p>
+
+        <div class="text-info small" ng-show="status && !busy">{{ status }}</div>
+        <div class="text-danger small" ng-show="error">{{ error }}</div>
+        <div class="loader" ng-show="loading && !busy"></div>
+
+        <div class="row" ng-show="!loading || busy || lists.length">
+        <div class="col-lg-6">
+            <table class="table table-sm table-hover">
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Provider</th>
+                        <th>Matched</th>
+                        <th>Channel</th>
+                        <th>Last refresh</th>
+                        <th style="width: 7rem;"></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr ng-if="lists.length === 0">
+                        <td colspan="6" class="text-center text-muted py-4">
+                            No tracked lists yet. Click <strong>Add list</strong> to follow a Letterboxd or Trakt URL.
+                        </td>
+                    </tr>
+                    <tr ng-repeat="list in lists track by list.id"
+                        ng-click="!busy && selectList(list.id)"
+                        style="cursor: pointer;"
+                        ng-class="{'table-active': selected && selected.id === list.id, 'text-muted': busy}">
+                        <td>
+                            <strong>{{ list.name }}</strong>
+                            <div class="small text-danger" ng-if="list.lastError && !list.lastRefreshOk">
+                                {{ list.lastError }}
+                            </div>
+                        </td>
+                        <td>
+                            <span class="badge badge-secondary text-uppercase">{{ list.provider || '?' }}</span>
+                        </td>
+                        <td>
+                            <span class="text-success">{{ list.matchedCount }}</span>
+                            <span class="text-muted">/ {{ list.itemCount }}</span>
+                        </td>
+                        <td>
+                            <span ng-if="list.channelNumber != null">#{{ list.channelNumber }}</span>
+                            <span class="text-muted" ng-if="list.channelNumber == null">—</span>
+                        </td>
+                        <td class="small text-muted">{{ formatTime(list.lastRefreshAt) }}</td>
+                        <td class="text-right" ng-click="$event.stopPropagation()">
+                            <button type="button" class="btn btn-link btn-sm p-0 mr-1"
+                                title="Refresh"
+                                ng-click="refreshOne(list)"
+                                ng-disabled="busy">
+                                <i class="fa fa-sync"></i>
+                            </button>
+                            <button type="button" class="btn btn-link btn-sm p-0"
+                                title="Delete"
+                                ng-click="deleteList(list)"
+                                ng-disabled="busy">
+                                <i class="fas fa-trash-alt text-danger"></i>
+                            </button>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="col-lg-6">
+            <div class="card" ng-show="selected || detailLoading">
+                <div class="card-header py-2 d-flex align-items-center">
+                    <strong class="flex-grow-1">{{ selected.name || '…' }}</strong>
+                    <button type="button" class="btn btn-sm btn-outline-primary mr-1"
+                        ng-if="selected"
+                        ng-click="refreshOne(selected)"
+                        ng-disabled="busy || detailLoading">
+                        <span class="fa fa-sync"></span> Refresh
+                    </button>
+                    <button type="button" class="btn btn-sm btn-success"
+                        ng-if="selected && selected.channelNumber == null"
+                        ng-click="createChannelForList(selected)"
+                        ng-disabled="busy || detailLoading || !selected.matchedCount">
+                        Create channel
+                    </button>
+                </div>
+                <div class="card-body small" ng-show="detailLoading">
+                    <span class="fa fa-spinner fa-spin"></span> Loading…
+                </div>
+                <div class="card-body small" ng-show="selected && !detailLoading">
+                    <div class="form-row align-items-end mb-2">
+                        <div class="form-group col-md-7 mb-2">
+                            <label class="small mb-1">Name</label>
+                            <input type="text" class="form-control form-control-sm"
+                                ng-model="edit.name"
+                                ng-disabled="busy"
+                                autocomplete="off" />
+                        </div>
+                        <div class="form-group col-md-3 mb-2">
+                            <label class="small mb-1">Channel #</label>
+                            <input type="number" min="1" step="1" class="form-control form-control-sm"
+                                placeholder="—"
+                                ng-model="edit.channelNumber"
+                                ng-disabled="busy"
+                                autocomplete="off" />
+                        </div>
+                        <div class="form-group col-md-2 mb-2">
+                            <button type="button" class="btn btn-sm btn-primary btn-block"
+                                ng-click="saveListIdentity()"
+                                ng-disabled="busy || !edit.name.trim()">
+                                <span class="fa fa-spinner fa-spin" ng-show="busy"></span>
+                                {{ busy ? '…' : 'Save' }}
+                            </button>
+                        </div>
+                    </div>
+                    <p class="text-muted small mb-2">
+                        Name and channel number stay in sync with <a href="#!/channels">Channels</a>.
+                        Leave channel # empty to unlink (does not delete the channel).
+                    </p>
+
+                    <div class="border rounded p-2 mb-2">
+                        <div class="font-weight-bold small mb-2">Create / keep channel</div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="edit-create-channel"
+                                id="edit-create-channel-yes"
+                                ng-model="edit.createChannel"
+                                ng-value="true"
+                                ng-disabled="busy" />
+                            <label class="form-check-label small" for="edit-create-channel-yes">Yes</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="edit-create-channel"
+                                id="edit-create-channel-no"
+                                ng-model="edit.createChannel"
+                                ng-value="false"
+                                ng-disabled="busy" />
+                            <label class="form-check-label small" for="edit-create-channel-no">No</label>
+                        </div>
+                        <small class="form-text text-muted mb-0">
+                            Yes creates a channel if none is linked, and keeps it updated on refresh.
+                        </small>
+                    </div>
+                    <div class="border rounded p-2 mb-2">
+                        <div class="font-weight-bold small mb-2">Save as custom show</div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="edit-custom-show"
+                                id="edit-custom-show-yes"
+                                ng-model="edit.saveAsCustomShow"
+                                ng-value="true"
+                                ng-disabled="busy" />
+                            <label class="form-check-label small" for="edit-custom-show-yes">Yes</label>
+                        </div>
+                        <div class="form-check form-check-inline">
+                            <input class="form-check-input" type="radio" name="edit-custom-show"
+                                id="edit-custom-show-no"
+                                ng-model="edit.saveAsCustomShow"
+                                ng-value="false"
+                                ng-disabled="busy" />
+                            <label class="form-check-label small" for="edit-custom-show-no">No</label>
+                        </div>
+                        <small class="form-text text-muted mb-0">
+                            Yes creates/updates a custom show with matched programs on each refresh.
+                            <span ng-if="selected.customShowId">Linked show id: {{ selected.customShowId }}</span>
+                        </small>
+                    </div>
+
+                    <div class="border rounded p-2 mb-3 bg-light">
+                        <div class="font-weight-bold small mb-1">Save as media playlist</div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="edit-push-plex"
+                                ng-model="edit.pushToPlex"
+                                ng-disabled="busy || !hasPlex" />
+                            <label class="form-check-label small" for="edit-push-plex">
+                                Plex playlist
+                                <span class="text-muted" ng-if="!hasPlex">(no Plex server in Settings)</span>
+                            </label>
+                        </div>
+                        <div class="form-group mb-2 mt-1 ml-3" ng-show="edit.pushToPlex && hasPlex">
+                            <label class="small mb-1" for="edit-plex-lib">Plex library</label>
+                            <select id="edit-plex-lib" class="form-control form-control-sm"
+                                ng-model="edit.plexLibraryRef"
+                                ng-disabled="busy || plexLibraries.length === 0">
+                                <option value="">Select library…</option>
+                                <option ng-repeat="lib in plexLibraries track by (lib.serverName + '|' + lib.sectionKey)"
+                                    value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                    {{ lib.label }}
+                                </option>
+                            </select>
+                            <small class="form-text text-muted" ng-if="plexLibraries.length === 0">
+                                Sync Plex libraries under Library → Management first.
+                            </small>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="edit-push-jellyfin"
+                                ng-model="edit.pushToJellyfin"
+                                ng-disabled="busy || !hasJellyfin" />
+                            <label class="form-check-label small" for="edit-push-jellyfin">
+                                Jellyfin playlist
+                                <span class="text-muted" ng-if="!hasJellyfin">(no Jellyfin server in Settings)</span>
+                            </label>
+                        </div>
+                        <small class="form-text text-muted mb-0">
+                            Creates/updates a playlist named after this list on each refresh.
+                            Plex items are limited to the selected library.
+                        </small>
+                        <div class="small text-muted mt-1" ng-if="selected.plexPlaylistId || selected.jellyfinPlaylistId || selected.plexLibraryTitle">
+                            <span ng-if="selected.plexLibraryTitle">Plex library: {{ selected.plexLibraryTitle }}</span>
+                            <span ng-if="selected.plexPlaylistId"> · playlist {{ selected.plexPlaylistId }}</span>
+                            <span ng-if="selected.jellyfinPlaylistId"> · Jellyfin {{ selected.jellyfinPlaylistId }}</span>
+                        </div>
+                        <div class="small text-warning mt-1" ng-if="selected.lastPlaylistPushError">
+                            {{ selected.lastPlaylistPushError }}
+                        </div>
+                    </div>
+
+                    <div class="mb-2" ng-if="selected.url">
+                        <span class="text-muted">URL:</span>
+                        <a ng-href="{{ selected.url }}" target="_blank" rel="noopener">{{ selected.url }}</a>
+                    </div>
+                    <div class="mb-2" ng-if="selected.listNameFromSource">
+                        <span class="text-muted">Source title:</span> {{ selected.listNameFromSource }}
+                    </div>
+                    <div class="mb-2">
+                        <span class="text-muted">Matched:</span>
+                        <strong class="text-success">{{ selected.matchedCount }}</strong>
+                        of {{ selected.itemCount }}
+                        <span class="text-muted ml-2">Missing:</span>
+                        <strong class="text-warning">{{ selected.unmatchedCount }}</strong>
+                    </div>
+                    <div class="mb-2" ng-if="selected.channelNumber != null">
+                        <span class="text-muted">Linked channel:</span>
+                        <a href="#!/channels">#{{ selected.channelNumber }}</a>
+                        <span class="text-muted">(programs updated on list refresh)</span>
+                    </div>
+                    <div class="mb-2" ng-if="selected.customShowId">
+                        <span class="text-muted">Custom show:</span>
+                        <a href="#!/custom-shows">{{ selected.name }}</a>
+                        <span class="text-muted">(content updated on list refresh)</span>
+                    </div>
+                    <div class="text-warning mb-2" ng-if="selected.lastError">
+                        {{ selected.lastError }}
+                    </div>
+
+                    <div ng-if="selected.unmatchedSample && selected.unmatchedSample.length">
+                        <strong>Not in library (sample)</strong>
+                        <ul class="mb-2 pl-3" style="max-height: 8rem; overflow-y: auto;">
+                            <li ng-repeat="u in selected.unmatchedSample | limitTo:30 track by $index">
+                                {{ u.title }}<span ng-if="u.year"> ({{ u.year }})</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div ng-if="selected.programs && selected.programs.length">
+                        <strong>Matched programs</strong>
+                        <ul class="mb-0 pl-3" style="max-height: 14rem; overflow-y: auto;">
+                            <li ng-repeat="p in selected.programs track by $index">
+                                {{ p.title }}
+                                <span class="text-muted" ng-if="p.year"> ({{ p.year }})</span>
+                                <span class="badge badge-light border text-uppercase" style="font-size: 0.6rem;"
+                                    ng-if="p.source">{{ p.source }}</span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            <div class="text-muted small" ng-show="!selected && !detailLoading">
+                Select a list to see matches and missing titles.
+            </div>
+        </div>
+    </div>
+    </div><!-- /.lists-section -->
+
+    <!-- Add list modal -->
+    <div ng-show="showAdd">
+        <div class="modal" tabindex="-1" role="dialog" style="display: block; background-color: rgba(0, 0, 0, .5);">
+            <div class="modal-dialog modal-dialog-scrollable" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Add tracked list</h5>
+                    </div>
+                    <div class="modal-body">
+                        <div class="form-group">
+                            <label class="small mb-1">Name <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control form-control-sm"
+                                placeholder="Channel / list name"
+                                ng-model="form.name"
+                                ng-disabled="busy"
+                                autocomplete="off" />
+                        </div>
+                        <div class="form-group">
+                            <label class="small mb-1">List URL</label>
+                            <input type="url" class="form-control form-control-sm"
+                                placeholder="https://letterboxd.com/…/list/…  ·  https://trakt.tv/users/…/lists/…"
+                                ng-model="form.url"
+                                ng-disabled="busy"
+                                autocomplete="off" />
+                            <small class="form-text text-muted">
+                                Letterboxd pages are scraped (all pages). Trakt uses the API (Settings → Trakt).
+                                IMDB URLs are not supported — paste a CSV or titles instead.
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label class="small mb-1">Or paste titles / CSV</label>
+                            <textarea class="form-control form-control-sm" rows="4"
+                                placeholder="Optional paste fallback…"
+                                ng-model="form.text"
+                                ng-disabled="busy"></textarea>
+                        </div>
+                        <div class="border rounded p-2 mb-2">
+                            <div class="font-weight-bold small mb-2">Create channel</div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="add-create-channel"
+                                    id="add-create-channel-yes"
+                                    ng-model="form.createChannel"
+                                    ng-value="true"
+                                    ng-disabled="busy" />
+                                <label class="form-check-label small" for="add-create-channel-yes">Yes</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="add-create-channel"
+                                    id="add-create-channel-no"
+                                    ng-model="form.createChannel"
+                                    ng-value="false"
+                                    ng-disabled="busy" />
+                                <label class="form-check-label small" for="add-create-channel-no">No</label>
+                            </div>
+                            <small class="form-text text-muted mb-0">
+                                If yes, a channel is created and updated on each list refresh.
+                            </small>
+                        </div>
+                        <div class="border rounded p-2 mb-2">
+                            <div class="font-weight-bold small mb-2">Save as custom show</div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="add-custom-show"
+                                    id="add-custom-show-yes"
+                                    ng-model="form.saveAsCustomShow"
+                                    ng-value="true"
+                                    ng-disabled="busy" />
+                                <label class="form-check-label small" for="add-custom-show-yes">Yes</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="add-custom-show"
+                                    id="add-custom-show-no"
+                                    ng-model="form.saveAsCustomShow"
+                                    ng-value="false"
+                                    ng-disabled="busy" />
+                                <label class="form-check-label small" for="add-custom-show-no">No</label>
+                            </div>
+                            <small class="form-text text-muted mb-0">
+                                If yes, a custom show is created/updated with matched programs (list order).
+                            </small>
+                        </div>
+                        <div class="border rounded p-2 mt-3 bg-light">
+                            <div class="font-weight-bold small mb-1">Save as media playlist</div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="add-push-plex"
+                                    ng-model="form.pushToPlex"
+                                    ng-disabled="busy || !hasPlex" />
+                                <label class="form-check-label small" for="add-push-plex">
+                                    Plex playlist
+                                    <span class="text-muted" ng-if="!hasPlex">(no Plex server in Settings)</span>
+                                </label>
+                            </div>
+                            <div class="form-group mb-2 mt-1 ml-3" ng-show="form.pushToPlex && hasPlex">
+                                <label class="small mb-1" for="add-plex-lib">Plex library</label>
+                                <select id="add-plex-lib" class="form-control form-control-sm"
+                                    ng-model="form.plexLibraryRef"
+                                    ng-disabled="busy || plexLibraries.length === 0">
+                                    <option value="">Select library…</option>
+                                    <option ng-repeat="lib in plexLibraries track by (lib.serverName + '|' + lib.sectionKey)"
+                                        value="{{ lib.serverName + '|' + lib.sectionKey }}">
+                                        {{ lib.label }}
+                                    </option>
+                                </select>
+                                <small class="form-text text-muted" ng-if="plexLibraries.length === 0">
+                                    Sync Plex libraries under Library → Management first.
+                                </small>
+                            </div>
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="checkbox" id="add-push-jellyfin"
+                                    ng-model="form.pushToJellyfin"
+                                    ng-disabled="busy || !hasJellyfin" />
+                                <label class="form-check-label small" for="add-push-jellyfin">
+                                    Jellyfin playlist
+                                    <span class="text-muted" ng-if="!hasJellyfin">(no Jellyfin server in Settings)</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="text-danger small mt-2" ng-show="error">{{ error }}</div>
+                        <div class="text-info small mt-2" ng-show="status">{{ status }}</div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-sm btn-secondary"
+                            ng-click="closeAdd()"
+                            ng-disabled="busy">Cancel</button>
+                        <button type="button" class="btn btn-sm btn-primary"
+                            ng-click="addList()"
+                            ng-disabled="busy || !form.name.trim() || (!form.url.trim() && !form.text.trim())">
+                            <span class="fa fa-spinner fa-spin" ng-show="busy"></span>
+                            {{ busy ? 'Processing…' : 'Add & match' }}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

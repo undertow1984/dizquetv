@@ -147,20 +147,27 @@ module.exports = function ($http, $window, $interval, dizquetv) {
         },
 
         /**
+         * Library sections.
+         * Default: local library cache only (programming UI).
+         * Live Plex is only used when options.preferLive === true (Library Management).
          * @param {*} server
-         * @param {{ includeDisabled?: boolean }} [options] includeDisabled=true for management UI
+         * @param {{ includeDisabled?: boolean, preferLive?: boolean }} [options]
          */
         getLibrary: async (server, options) => {
             options = options || {};
-            // Prefer local cache when available (management can force live with preferLive)
             if (!options.preferLive) {
                 try {
-                    let cached = await dizquetv.getPlexCacheSections(server.name, !!options.includeDisabled);
+                    let cached = await dizquetv.getPlexCacheSections(
+                        server.name,
+                        !!options.includeDisabled,
+                        !!options.includeHidden
+                    );
                     // fromCache is authoritative (empty list = all disabled / no sections)
                     if (cached && cached.fromCache && Array.isArray(cached.sections)) {
                         return cached.sections;
                     }
-                } catch (e) { /* fall through to live Plex */ }
+                } catch (e) { /* ignore */ }
+                return [];
             }
 
             var client = new Plex(server)
@@ -201,14 +208,20 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                 }
             return sections
         },
-        getPlaylists: async (server) => {
+        /**
+         * Playlists — cache only unless preferLive (not used by programming UI).
+         */
+        getPlaylists: async (server, options) => {
+            options = options || {};
             try {
-                let cached = await dizquetv.getPlexCachePlaylists(server.name);
-                // fromCache true only when playlists.json was synced (empty list is valid)
+                let cached = await dizquetv.getPlexCachePlaylists(server.name, !!options.includeHidden);
                 if (cached && cached.fromCache && Array.isArray(cached.playlists)) {
-                    return cached.playlists;
+                    return filterNonEmptyListSources(cached.playlists);
                 }
-            } catch (e) { /* fall through */ }
+            } catch (e) { /* ignore */ }
+            if (!options.preferLive) {
+                return [];
+            }
 
             var client = new Plex(server)
             const res = await client.Get('/playlists')
@@ -225,20 +238,25 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                         type: 'playlist',
                         icon: `${server.uri}${res.Metadata[i].composite}?X-Plex-Token=${server.accessToken}`,
                         duration: res.Metadata[i].duration,
-                        // leafCount = items in playlist (movies/episodes/tracks)
                         count: plexItemCount(res.Metadata[i]),
                     })
                 }
-            return playlists
+            return filterNonEmptyListSources(playlists)
         },
-        getCollections: async (server) => {
+        /**
+         * Collections — cache only unless preferLive.
+         */
+        getCollections: async (server, options) => {
+            options = options || {};
             try {
-                let cached = await dizquetv.getPlexCacheCollections(server.name);
-                // fromCache true when any library was synced (empty collections is valid)
+                let cached = await dizquetv.getPlexCacheCollections(server.name, !!options.includeHidden);
                 if (cached && cached.fromCache && Array.isArray(cached.collections)) {
-                    return cached.collections;
+                    return filterNonEmptyListSources(cached.collections);
                 }
-            } catch (e) { /* fall through */ }
+            } catch (e) { /* ignore */ }
+            if (!options.preferLive) {
+                return [];
+            }
 
             var client = new Plex(server)
             const res = await client.Get('/library/sections')
@@ -258,7 +276,7 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                     for (let q = 0; q < metadata.length; q++) {
                         let title = metadata[q].title;
                         if (section.type === 'show') {
-                            title = metadata[q].title + " Collection";
+                            title = metadata[q].title;
                         }
                         collections.push({
                             title: title,
@@ -277,22 +295,28 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                     console.error("Unable to load collections for library section " + section.title, err);
                 }
             }
-            return collections
+            return filterNonEmptyListSources(collections)
         },
         /**
          * Flat list of TV shows from enabled show libraries (no collections).
          * Same shape as playlists/collections for bulk import & content sources.
          */
-        getShows: async (server) => {
+        /**
+         * Flat TV show list — cache only unless preferLive.
+         */
+        getShows: async (server, options) => {
+            options = options || {};
             try {
-                let cached = await dizquetv.getPlexCacheShows(server.name);
-                // fromCache true only when a show library was synced (empty list is valid)
+                let cached = await dizquetv.getPlexCacheShows(server.name, !!options.includeHidden);
                 if (cached && cached.fromCache && Array.isArray(cached.shows)) {
                     return cached.shows;
                 }
-            } catch (e) { /* fall through */ }
+            } catch (e) { /* ignore */ }
+            if (!options.preferLive) {
+                return [];
+            }
 
-            // Live fallback: force live sections so a movies-only cache cannot hide unsynced TV libraries
+            // Live fallback (management/tools only)
             let sections = await exported.getLibrary(server, { preferLive: true });
             let shows = [];
             let errors = [];
@@ -391,7 +415,17 @@ module.exports = function ($http, $window, $interval, dizquetv) {
             }
             return result;
         },
-        getNested: async (server, lib, includeCollections, errors) => {
+        /**
+         * Expand a library node. Programming UI: cache only.
+         * Live Plex only when options.preferLive === true.
+         * @param {*} server
+         * @param {*} lib
+         * @param {boolean} includeCollections
+         * @param {string[]} [errors]
+         * @param {{ preferLive?: boolean }} [options]
+         */
+        getNested: async (server, lib, includeCollections, errors, options) => {
+            options = options || {};
             const key = lib.key
             // Prefer children already loaded from cache (playlist/collection expand)
             if (Object.prototype.hasOwnProperty.call(lib, 'children') && Array.isArray(lib.children)) {
@@ -403,12 +437,11 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                 }
                 return nested;
             }
-            // Prefer local disk cache when available
+            // Prefer local disk/memory cache
             try {
                 let cached = await dizquetv.getPlexCacheNested(server.name, key, includeCollections === true);
                 if (cached && cached.fromCache && Array.isArray(cached.nested)) {
                     let nested = cached.nested.slice();
-                    // Attach server for UI expansion paths that expect it
                     for (let i = 0; i < nested.length; i++) {
                         if (nested[i] && !nested[i].server) {
                             nested[i].server = server;
@@ -416,7 +449,12 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                     }
                     return nested;
                 }
-            } catch (e) { /* fall through to live Plex */ }
+            } catch (e) { /* ignore */ }
+
+            // Default programming path: never call live Plex
+            if (!options.preferLive) {
+                return [];
+            }
 
             var client = new Plex(server)
             const res = await client.Get(key)
@@ -544,7 +582,7 @@ module.exports = function ($http, $window, $interval, dizquetv) {
                 for (let i = 0; i < directories.length; i++) {
                     let title;
                     if (res.viewGroup === "show") {
-                        title = directories[i].title + " Collection"
+                        title = directories[i].title
                     } else {
                         title = directories[i].title;
                     }
@@ -595,4 +633,30 @@ function plexItemCount(meta) {
         }
     }
     return null;
+}
+
+/**
+ * Hide playlists/collections with no addable content (count 0 or empty children).
+ * Items with unknown count (null/undefined) are kept.
+ */
+function filterNonEmptyListSources(list) {
+    if (!Array.isArray(list)) {
+        return [];
+    }
+    return list.filter(function (item) {
+        if (!item) {
+            return false;
+        }
+        if (Array.isArray(item.children) && item.children.length === 0) {
+            return false;
+        }
+        if (item.count === null || typeof item.count === 'undefined' || item.count === '') {
+            return true;
+        }
+        let n = parseInt(item.count, 10);
+        if (isNaN(n)) {
+            return true;
+        }
+        return n > 0;
+    });
 }

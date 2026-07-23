@@ -37,6 +37,7 @@
                 {{x.name}} <span ng-if='x.stealth===true' class='text-muted'>(Stealth)</span>
                 <div class="small text-muted" ng-if="x.contentSources && x.contentSources.length">
                     <span ng-repeat="src in x.contentSources track by $index">
+                        <span class="text-uppercase" ng-if="src.mediaSource || src.source">{{ src.mediaSource || src.source }}</span>
                         <span class="text-capitalize">{{ src.type }}</span>: {{ src.title }}<span ng-if="!$last"> · </span>
                     </span>
                 </div>

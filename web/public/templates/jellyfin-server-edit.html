@@ -1,0 +1,90 @@
+<div ng-show="state.visible">
+    <div class="modal" tabindex="-1" role="dialog" style="display: block; background-color: rgba(0, 0, 0, .5);">
+        <div class="modal-dialog modal-dialog-scrollable modal-xl" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Jellyfin Server</h5>
+                </div>
+                <div class="modal-body container">
+
+                    <div ng-if="state.channelReport == null" class="form-group">
+                        <label>Name:</label>
+                        <input class="form-control" type="text" placeholder="{{state.server.name}}" readonly>
+                    </div>
+
+                    <div ng-if="state.channelReport == null" class="form-group">
+                        <label for="jf-uri">Server URI:</label>
+                        <input type="text" class="form-control" id="jf-uri" ng-model="state.server.uri" ng-change="setModified()">
+                    </div>
+
+                    <div ng-if="state.channelReport == null" class="form-group">
+                        <label ng-if="!state.accessVisible">API Key</label>
+                        <label ng-if="state.accessVisible">API Key (do not share)</label>
+                        <div class="input-group">
+                            <input ng-if="!state.accessVisible" type="password" class="form-control" ng-model="state.server.apiKey" ng-change="setModified()">
+                            <input ng-if="state.accessVisible" type="text" class="form-control" ng-model="state.server.apiKey" ng-change="setModified()">
+                            <div class="input-group-append">
+                                <button class="btn btn-secondary form-control form-control-sm" type="button" ng-click="state.accessVisible = !state.accessVisible">
+                                    <i ng-hide="state.accessVisible" class="fa fa-eye"></i>
+                                    <i ng-show="state.accessVisible" class="fa fa-asterisk"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div ng-if="state.channelReport == null" class="form-group">
+                        <label for="jf-user">User ID (optional GUID)</label>
+                        <input type="text" class="form-control" id="jf-user" ng-model="state.server.userId" ng-change="setModified()"
+                            placeholder="leave blank to auto-select">
+                        <small class="form-text text-muted">
+                            Paste the user GUID from Jellyfin (Dashboard → Users), not the login name.
+                            Clear the field and save to re-auto-detect.
+                        </small>
+                    </div>
+
+                    <div ng-if="state.channelReport == null" ng-hide="state.showDelete" class="form-group">
+                        <button class="btn btn-link" ng-click="onShowDelete()">
+                            <span class="text-danger"><i class="fa fa-trash-alt"></i> Delete server...</span>
+                        </button>
+                    </div>
+
+                    <div ng-if="state.channelReport == null" ng-show="state.showDelete" class="card" style="width: 100%;">
+                        <div class="card-body">
+                            <h5 class="card-title">Delete Server</h5>
+                            <p class="card-text">
+                                If you delete a Jellyfin server, programs that reference it will be replaced with Flex time.
+                                Fillers/custom shows that reference it will be cleaned up. This cannot be undone.
+                            </p>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-danger" ng-click="onDelete();">
+                            <i class="fa fa-trash-alt"></i> Delete
+                        </button>
+                    </div>
+
+                    <div ng-if="state.channelReport != null" class="card" style="width: 100%;">
+                        <div class="card-body">
+                            <h5 class="card-title">Server deleted</h5>
+                            <table class="table">
+                                <tr ng-repeat="x in state.channelReport" ng-if="x.destroyedPrograms &gt; 0">
+                                    <td>{{x.channelNumber}}</td>
+                                    <td>{{x.channelName}}</td>
+                                    <td>{{x.destroyedPrograms}} program{{ (x.destroyedPrograms&gt;1?'s':'') }} removed.</td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div ng-if="state.error" class="text-danger">{{ state.error }}</div>
+                    <div ng-if="state.success" class="text-success">{{ state.success }}</div>
+                </div>
+                <div class="modal-footer">
+                    <div class="loader mr-auto" ng-if="loading.show"></div>
+                    <button type="button" class="btn btn-sm btn-secondary" ng-click="onFinish()">Close</button>
+                    <button ng-if="state.channelReport == null" type="button" class="btn btn-sm btn-success" ng-disabled="!state.modified" ng-click="onSave()">
+                        Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

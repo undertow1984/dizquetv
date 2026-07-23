@@ -57,7 +57,7 @@ module.exports = function ($scope, dizquetv) {
         }
         if (typeof channel !== 'undefined') {
             if ($scope.selectedChannelIndex == -1) { // add new channel
-                // Server may generate dynamic logo and return channel with icon path
+                // Server generates dynamic PSD logo and returns channel with icon path
                 await dizquetv.addChannel(channel);
                 $scope.showChannelConfig = false
                 $scope.refreshChannels();
@@ -66,16 +66,21 @@ module.exports = function ($scope, dizquetv) {
                    (typeof($scope.originalChannelNumber) !== 'undefined')
                       && ($scope.originalChannelNumber != channel.number)
             ) {
-                //update + change channel number.
+                // update + change channel number (pass previous so tracked Lists stay linked)
                 $scope.channels[ $scope.selectedChannelIndex ].pending = true;
-                await dizquetv.updateChannel(channel);
+                await dizquetv.updateChannel(channel, {
+                    previousNumber: $scope.originalChannelNumber,
+                });
                 await dizquetv.removeChannel( { number: $scope.originalChannelNumber } )
                 $scope.showChannelConfig = false
                 $scope.$apply();
                 $scope.refreshChannels();
             } else { // update existing channel
                 $scope.channels[ $scope.selectedChannelIndex ].pending = true;
-                await dizquetv.updateChannel(channel);
+                // Response includes server-side dynamic logo path (do not keep client dizquetv.png)
+                await dizquetv.updateChannel(channel, {
+                    previousNumber: $scope.originalChannelNumber,
+                });
                 $scope.showChannelConfig = false
                 $scope.$apply();
                 $scope.refreshChannels();

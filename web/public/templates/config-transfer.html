@@ -1,0 +1,94 @@
+<div>
+    <h5>Configuration Export / Import</h5>
+    <p class="text-muted small">
+        Export packs the <code>config</code> and <code>images</code> directories into a zip file
+        (channels, settings, custom shows, filler, logos, and uploads).
+        Import restores a previously exported zip. Your current configuration is always backed up first
+        under the server <code>backup</code> directory as <code>backup&lt;timestamp&gt;.zip</code>.
+    </p>
+
+    <div class="alert alert-info small" ng-show="message">{{ message }}</div>
+    <div class="alert alert-danger small" ng-show="error">{{ error }}</div>
+    <div class="alert alert-success small" ng-show="lastBackupName && !error">
+        Previous configuration backed up as <strong>{{ lastBackupName }}</strong>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6 mb-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <h6 class="card-title">Export</h6>
+                    <p class="card-text small text-muted">
+                        Download a zip of the current <code>config</code> and <code>images</code> folders.
+                    </p>
+                    <button type="button"
+                        class="btn btn-sm btn-primary"
+                        ng-click="exportConfig()"
+                        ng-disabled="exporting || importing">
+                        <span class="fa fa-spinner fa-spin" ng-show="exporting"></span>
+                        <span class="fa fa-download" ng-show="!exporting"></span>
+                        Export configuration
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6 mb-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <h6 class="card-title">Import</h6>
+                    <p class="card-text small text-muted">
+                        Choose a dizqueTV configuration zip to replace the current setup.
+                    </p>
+                    <input type="file"
+                        id="configImportFile"
+                        accept=".zip,application/zip"
+                        class="form-control-file form-control-sm mb-2"
+                        ng-disabled="exporting || importing" />
+                    <p class="small text-muted mb-0" ng-show="pendingFile && importConfirmOpen">
+                        Selected: <strong>{{ pendingFile.name }}</strong>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm import modal -->
+    <div class="modal" tabindex="-1" role="dialog" ng-show="importConfirmOpen"
+        style="display: block; background-color: rgba(0, 0, 0, .5);">
+        <div class="modal-dialog" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title text-danger">
+                        <i class="fa fa-exclamation-triangle"></i> Replace configuration?
+                    </h5>
+                </div>
+                <div class="modal-body">
+                    <p>
+                        Importing this zip will <strong>remove your existing configuration and channels</strong>
+                        and replace them with the contents of the archive.
+                    </p>
+                    <p>
+                        Your current <code>config</code> and <code>images</code> folders will be backed up first
+                        as a zip in the server <code>backup</code> directory
+                        (named <code>backup&lt;timestamp&gt;.zip</code>) before anything is overwritten.
+                    </p>
+                    <p class="mb-0 text-muted small" ng-if="pendingFile">
+                        File: {{ pendingFile.name }}
+                        <span ng-if="pendingFile.size"> ({{ (pendingFile.size / 1024 / 1024) | number:2 }} MB)</span>
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-sm btn-link"
+                        ng-click="cancelImport()"
+                        ng-disabled="importing">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-danger"
+                        ng-click="confirmImport()"
+                        ng-disabled="importing">
+                        <span class="fa fa-spinner fa-spin" ng-show="importing"></span>
+                        Back up and import
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

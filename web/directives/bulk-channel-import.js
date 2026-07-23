@@ -1,4 +1,4 @@
-module.exports = function ($timeout, $location, plex, dizquetv, commonProgramTools) {
+module.exports = function ($timeout, $location, plex, jellyfin, dizquetv, commonProgramTools, libraryCatalogPreload) {
     return {
         restrict: 'E',
         templateUrl: 'templates/bulk-channel-import.html',
@@ -10,18 +10,27 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
         },
         link: function (scope) {
             scope.servers = [];
-            scope.selectedServerName = null;
-            scope.playlists = [];
-            scope.collections = [];
+/** 'all' | 'plex' | 'jellyfin' */
+            scope.mediaSourceFilter = 'all';
+            /** Merged playlists + collections */
+            scope.lists = [];
             scope.shows = [];
-            scope.playlistFilter = "";
-            scope.collectionFilter = "";
+            scope.customShows = [];
+            /** Full unfiltered catalog (all servers) */
+            scope._allLists = [];
+            scope._allShows = [];
+            scope._allCustomShows = [];
+            scope.listFilter = "";
             scope.showFilter = "";
+            scope.customFilter = "";
             scope.loading = false;
             scope.importing = false;
             scope.status = "";
             scope.errors = [];
             scope.progress = { current: 0, total: 0 };
+
+            /** Optional channel name override for content-source import. */
+            scope.channelName = "";
 
             function sortByTitle(items) {
                 return (items || []).slice().sort((a, b) => {
@@ -31,16 +40,8 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                 });
             }
 
-            function getSelectedServer() {
-                if (!scope.selectedServerName) {
-                    return null;
-                }
-                for (let i = 0; i < scope.servers.length; i++) {
-                    if (scope.servers[i].name === scope.selectedServerName) {
-                        return scope.servers[i];
-                    }
-                }
-                return null;
+            function mediaApi(mediaSource) {
+                return mediaSource === 'jellyfin' ? jellyfin : plex;
             }
 
             function nextChannelNumber(knownChannels) {
@@ -84,36 +85,57 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                 return null;
             }
 
+            /** Same shape as channel-config content sources */
             function makeContentSource(server, source) {
                 let type = source.type || "playlist";
-                if (type !== "playlist" && type !== "collection" && type !== "show") {
+                if (
+                    type !== "playlist"
+                    && type !== "collection"
+                    && type !== "show"
+                    && type !== "custom"
+                ) {
                     type = "playlist";
                 }
+                let mediaSource = source.mediaSource || source.serverType || source.source
+                    || (type === 'custom' ? 'custom' : null)
+                    || (server && server.source) || 'plex';
                 return {
                     type: type,
                     key: source.key,
                     title: source.title,
-                    serverName: server.name,
+                    serverName: (server && server.name) || source.serverName || "",
+                    mediaSource: mediaSource,
+                    source: mediaSource,
+                    serverType: mediaSource,
                     collectionType: source.collectionType || null,
+                    collectionKind: source.collectionKind || null,
+                    playlistKind: source.playlistKind || null,
                     libraryTitle: source.libraryTitle || null,
+                    librarySectionKey: source.librarySectionKey || null,
+                    libraryType: source.libraryType || null,
+                    jellyfinId: source.jellyfinId || source.ratingKey || null,
+                    ratingKey: source.ratingKey || source.jellyfinId || null,
+                    genreId: source.genreId || null,
                     lastSyncedAt: new Date().toISOString(),
                 };
             }
 
+            function contentSourceId(src) {
+                let ms = src.mediaSource || src.serverType || src.source || 'plex';
+                return String(ms) + "\0" + (src.serverName || "") + "\0" + (src.type || "") + "\0" + (src.key || "");
+            }
+
             /**
-             * Merge newly imported sources into existing contentSources by serverName+type+key.
+             * Merge newly imported sources into existing contentSources.
              */
             function mergeContentSources(existing, incoming) {
                 let list = Array.isArray(existing) ? existing.slice() : [];
                 for (let i = 0; i < incoming.length; i++) {
                     let src = incoming[i];
+                    let id = contentSourceId(src);
                     let idx = -1;
                     for (let j = 0; j < list.length; j++) {
-                        if (
-                            list[j].serverName === src.serverName
-                            && list[j].type === src.type
-                            && list[j].key === src.key
-                        ) {
+                        if (contentSourceId(list[j]) === id) {
                             idx = j;
                             break;
                         }
@@ -129,7 +151,6 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
 
             function preparePrograms(programs) {
                 let list = programs.slice();
-                // Remove duplicates then randomize
                 if (typeof commonProgramTools.removeDuplicates === 'function') {
                     list = commonProgramTools.removeDuplicates(list);
                 }
@@ -184,8 +205,6 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                     iconDuration: 60,
                     iconPosition: "2",
                     startTime: defaultStartTime(),
-                    offlinePicture: `/images/generic-offline-screen.png`,
-                    offlineSoundtrack: '',
                     offlineMode: "pic",
                     duration: duration,
                     transcoding: {
@@ -205,121 +224,134 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
             });
 
             async function open() {
-                scope.playlists = [];
-                scope.collections = [];
+                scope.lists = [];
                 scope.shows = [];
-                scope.playlistFilter = "";
-                scope.collectionFilter = "";
+                scope.customShows = [];
+                scope._allLists = [];
+                scope._allShows = [];
+                scope._allCustomShows = [];
+                scope.listFilter = "";
                 scope.showFilter = "";
+                scope.customFilter = "";
                 scope.errors = [];
                 scope.status = "";
                 scope.progress = { current: 0, total: 0 };
                 scope.importing = false;
                 scope.loading = true;
                 scope._nextNumber = null;
+                scope.channelName = "";
                 $timeout();
                 try {
-                    let servers = await dizquetv.getPlexServers();
-                    scope.servers = servers || [];
-                    if (scope.servers.length === 0) {
-                        scope.selectedServerName = null;
-                        scope.loading = false;
-                        $timeout();
-                        return;
-                    }
-                    let prev = scope.selectedServerName;
-                    let stillThere = false;
-                    for (let i = 0; i < scope.servers.length; i++) {
-                        if (scope.servers[i].name === prev) {
-                            stillThere = true;
-                            break;
-                        }
-                    }
-                    scope.selectedServerName = stillThere ? prev : scope.servers[0].name;
+                    let plexServers = await dizquetv.getPlexServers().catch(() => []);
+                    let jfServers = await dizquetv.getJellyfinServers().catch(() => []);
+                    let servers = [];
+                    (plexServers || []).forEach((s) => {
+                        servers.push(Object.assign({}, s, {
+                            source: 'plex',
+                            displayName: 'Plex - ' + s.name,
+                        }));
+                    });
+                    (jfServers || []).forEach((s) => {
+                        servers.push(Object.assign({}, s, {
+                            source: 'jellyfin',
+                            displayName: 'Jellyfin - ' + s.name,
+                        }));
+                    });
+                    scope.servers = servers;
                     await scope.loadLists();
                 } catch (err) {
                     console.error(err);
-                    scope.errors.push("Unable to load Plex servers.");
+                    scope.errors.push("Unable to load media servers.");
                 } finally {
                     scope.loading = false;
                     $timeout();
                 }
             }
 
+            /**
+             * Load playlists+collections / shows / custom programming from local
+             * library cache only (same /api/content-sources/catalog as channel Properties).
+             */
             scope.loadLists = async () => {
-                scope.playlists = [];
-                scope.collections = [];
-                scope.shows = [];
-                scope.playlistFilter = "";
-                scope.collectionFilter = "";
+                scope.listFilter = "";
                 scope.showFilter = "";
+                scope.customFilter = "";
                 scope.errors = [];
-                let server = getSelectedServer();
-                if (!server) {
-                    $timeout();
-                    return;
-                }
                 scope.loading = true;
                 $timeout();
                 try {
-                    let play = await plex.getPlaylists(server);
-                    let cols = await plex.getCollections(server);
-                    let tv = await plex.getShows(server);
-                    play = sortByTitle(play).map((p) => {
-                        let row = {
-                            title: p.title,
-                            key: p.key,
-                            type: "playlist",
-                            selected: false,
-                            icon: p.icon,
-                            count: p.count,
-                        };
-                        // Keep cache children so expandToPrograms skips live Plex
-                        if (Array.isArray(p.children)) {
-                            row.children = p.children;
-                        }
-                        return row;
+                    // Plex/Jellyfin from session cache; custom shows always live
+                    await libraryCatalogPreload.ensureLoaded();
+                    let catalog = libraryCatalogPreload.getContentSourceCatalog()
+                        || await dizquetv.getContentSourceCatalog();
+                    let lists = (catalog.lists || []).map((p) => {
+                        return Object.assign({}, p, { selected: false });
                     });
-                    cols = sortByTitle(cols).map((c) => {
-                        let row = {
-                            title: c.title,
-                            key: c.key,
-                            type: "collection",
-                            collectionType: c.collectionType,
-                            libraryTitle: c.libraryTitle,
-                            selected: false,
-                            icon: c.icon,
-                            count: c.count,
-                        };
-                        if (Array.isArray(c.children)) {
-                            row.children = c.children;
-                        }
-                        return row;
+                    let shows = (catalog.shows || []).map((s) => {
+                        return Object.assign({}, s, { selected: false });
                     });
-                    tv = sortByTitle(tv).map((s) => {
-                        return {
-                            title: s.title,
-                            key: s.key,
-                            type: "show",
-                            libraryTitle: s.libraryTitle,
-                            selected: false,
-                            icon: s.icon,
-                            count: s.count,
-                            seasonCount: (typeof s.seasonCount !== 'undefined') ? s.seasonCount : null,
-                            episodeCount: (typeof s.episodeCount !== 'undefined') ? s.episodeCount : null,
-                            ratingKey: s.ratingKey,
-                        };
-                    });
-                    scope.playlists = play;
-                    scope.collections = cols;
-                    scope.shows = tv;
+                    let liveCustoms = await libraryCatalogPreload.fetchCustomShowsLive();
+                    let customShows = (liveCustoms || []).map((c) => ({
+                        title: c.name,
+                        key: c.id,
+                        type: 'custom',
+                        selected: false,
+                        count: c.count,
+                        serverName: '',
+                        mediaSource: 'custom',
+                        source: 'custom',
+                        serverType: 'custom',
+                    }));
+
+                    let warnings = catalog.warnings || [];
+                    for (let w = 0; w < warnings.length && w < 4; w++) {
+                        scope.errors.push(warnings[w]);
+                    }
+
+                    scope._allLists = sortByTitle(lists);
+                    scope._allShows = sortByTitle(shows);
+                    scope._allCustomShows = sortByTitle(customShows);
+                    scope.applyMediaSourceFilter();
                 } catch (err) {
                     console.error(err);
-                    scope.errors.push("Unable to load playlists/collections/shows from " + server.name);
+                    scope.errors.push("Unable to load content sources from cache.");
+                    scope._allLists = [];
+                    scope._allShows = [];
+                    scope._allCustomShows = [];
+                    scope.applyMediaSourceFilter();
                 } finally {
                     scope.loading = false;
                     $timeout();
                 }
+            };
+
+            scope.mediaSourceFilterFn = (item) => {
+                if (!item) return false;
+                let ms = item.mediaSource || item.serverType || item.source || 'plex';
+                if (ms === 'custom' || item.type === 'custom') return true;
+                if (scope.mediaSourceFilter === 'all') return true;
+                return ms === scope.mediaSourceFilter;
+            };
+
+            scope.setMediaSourceFilter = (v) => {
+                if (v === 'plex' || v === 'jellyfin' || v === 'all') {
+                    let prev = scope.mediaSourceFilter;
+                    scope.mediaSourceFilter = v;
+                    // Reload when switching media type so we don't keep unused server data warm only —
+                    // still cheap via cache; ensures empty-server types refresh cleanly.
+                    if (prev !== v) {
+                        scope.loadLists();
+                    } else {
+                        scope.applyMediaSourceFilter();
+                    }
+                }
+            };
+
+            scope.applyMediaSourceFilter = () => {
+                let f = scope.mediaSourceFilterFn;
+                scope.lists = (scope._allLists || []).filter(f);
+                scope.shows = (scope._allShows || []).filter(f);
+                scope.customShows = (scope._allCustomShows || []).slice();
             };
 
             scope.selectAll = (list, value) => {
@@ -349,19 +381,13 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
             };
 
             scope.importSelected = async () => {
-                let server = getSelectedServer();
-                if (!server || scope.importing) {
+                if (scope.importing) {
                     return;
                 }
                 let selected = [];
-                for (let i = 0; i < scope.playlists.length; i++) {
-                    if (scope.playlists[i].selected) {
-                        selected.push(scope.playlists[i]);
-                    }
-                }
-                for (let i = 0; i < scope.collections.length; i++) {
-                    if (scope.collections[i].selected) {
-                        selected.push(scope.collections[i]);
+                for (let i = 0; i < scope.lists.length; i++) {
+                    if (scope.lists[i].selected) {
+                        selected.push(scope.lists[i]);
                     }
                 }
                 for (let i = 0; i < scope.shows.length; i++) {
@@ -369,22 +395,30 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                         selected.push(scope.shows[i]);
                     }
                 }
+                for (let i = 0; i < scope.customShows.length; i++) {
+                    if (scope.customShows[i].selected) {
+                        selected.push(scope.customShows[i]);
+                    }
+                }
                 if (selected.length === 0) {
-                    scope.errors = ["Select at least one playlist, collection, or TV show."];
+                    scope.errors = ["Select at least one playlist, collection, TV show, or custom programming."];
                     $timeout();
                     return;
                 }
 
-                // Group by channel name so playlist + collection with the same title
-                // update one channel with both sources' content.
+                // If Name is set, all selected sources import into that one channel.
+                // Otherwise each content source title becomes the channel name
+                // (sources that share a title still merge into one channel).
+                let overrideName = (scope.channelName || "").trim();
                 let groups = {};
                 let groupOrder = [];
                 for (let i = 0; i < selected.length; i++) {
                     let src = selected[i];
-                    let key = normalizeName(src.title);
+                    let channelTitle = overrideName || src.title;
+                    let key = normalizeName(channelTitle);
                     if (!groups[key]) {
                         groups[key] = {
-                            name: src.title,
+                            name: channelTitle,
                             sources: [],
                         };
                         groupOrder.push(key);
@@ -403,7 +437,14 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                 let created = 0;
                 let updated = 0;
 
-                // Snapshot of known channels (name + number); refresh after each create
+                // Index servers for expand
+                let serverByKey = {};
+                for (let i = 0; i < scope.servers.length; i++) {
+                    let s = scope.servers[i];
+                    let ms = s.source || 'plex';
+                    serverByKey[ms + '\0' + s.name] = s;
+                }
+
                 let known = (scope.channels || []).map((c) => {
                     return { name: c.name, number: c.number };
                 });
@@ -421,8 +462,71 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
 
                         for (let s = 0; s < group.sources.length; s++) {
                             let source = group.sources[s];
-                            let more = await plex.expandToPrograms(server, source, expandErrors);
+                            let mediaSource = source.mediaSource || source.source || 'plex';
+
+                            if (source.type === 'custom' || mediaSource === 'custom') {
+                                try {
+                                    let show = await dizquetv.getShow(source.key);
+                                    if (!show || !Array.isArray(show.content) || !show.content.length) {
+                                        expandErrors.push(
+                                            `Custom programming "${source.title}" has no items.`
+                                        );
+                                        continue;
+                                    }
+                                    for (let c = 0; c < show.content.length; c++) {
+                                        let item = JSON.parse(JSON.stringify(show.content[c]));
+                                        item.customShowId = show.id || source.key;
+                                        item.customShowName = show.name || source.title;
+                                        item.customOrder = c;
+                                        if (typeof item.commercials === 'undefined') {
+                                            item.commercials = [];
+                                        }
+                                        programs.push(item);
+                                    }
+                                    contentSources.push(makeContentSource(null, source));
+                                } catch (err) {
+                                    console.error(err);
+                                    expandErrors.push(
+                                        `Failed custom programming "${source.title}".`
+                                    );
+                                }
+                                continue;
+                            }
+
+                            let server = serverByKey[mediaSource + '\0' + source.serverName];
+                            if (!server) {
+                                expandErrors.push(
+                                    "Server not found: " + mediaSource + " / " + source.serverName
+                                );
+                                continue;
+                            }
+                            let expandItem = Object.assign({}, source, {
+                                mediaSource: mediaSource,
+                                source: mediaSource,
+                                serverType: mediaSource,
+                            });
+                            if (mediaSource === 'jellyfin' && !expandItem.jellyfinId && expandItem.key) {
+                                let m = String(expandItem.key).match(/\/Items\/([^/?]+)/i)
+                                    || String(expandItem.key).match(/\/Genres\/([^/]+)/i)
+                                    || String(expandItem.key).match(/\/Favorites\/Library\/([^/?]+)/i);
+                                if (m) {
+                                    expandItem.jellyfinId = m[1];
+                                    expandItem.ratingKey = expandItem.ratingKey || m[1];
+                                }
+                            }
+                            let more = await mediaApi(mediaSource).expandToPrograms(
+                                server,
+                                expandItem,
+                                expandErrors
+                            );
                             if (more && more.length) {
+                                for (let m = 0; m < more.length; m++) {
+                                    if (mediaSource === 'jellyfin') {
+                                        more[m].source = 'jellyfin';
+                                        more[m].serverType = 'jellyfin';
+                                        more[m].serverKey = server.name;
+                                    }
+                                }
                                 programs = programs.concat(more);
                             }
                             contentSources.push(makeContentSource(server, source));
@@ -435,22 +539,24 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
                             scope.errors.push(`"${group.name}" has no importable items — skipped.`);
                             continue;
                         }
-
                         let prepared = preparePrograms(programs);
                         let existing = findChannelByName(group.name, known);
 
                         if (existing) {
-                            // Update existing channel: replace programming, shuffle, dedupe, track sources
                             let full = await dizquetv.getChannel(existing.number);
                             if (!full) {
-                                scope.errors.push(`Could not load channel #${existing.number} "${group.name}".`);
+                                scope.errors.push(
+                                    `Could not load channel #${existing.number} "${group.name}".`
+                                );
                                 continue;
                             }
                             full.programs = prepared.programs;
                             full.duration = prepared.duration;
                             full.startTime = full.startTime ? new Date(full.startTime) : defaultStartTime();
-                            full.contentSources = mergeContentSources(full.contentSources, contentSources);
-                            // Keep channel name as-is (preserve user's casing)
+                            full.contentSources = mergeContentSources(
+                                full.contentSources,
+                                contentSources
+                            );
                             await dizquetv.updateChannel(full);
                             updated++;
                         } else {
@@ -499,3 +605,4 @@ module.exports = function ($timeout, $location, plex, dizquetv, commonProgramToo
         }
     };
 };
+

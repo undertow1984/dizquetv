@@ -33,16 +33,34 @@ require('ng-i18next');
 var app = angular.module('myApp', ['ngRoute', 'vs-repeat', 'angularLazyImg', 'dndLists', 'luegg.directives', 'jm.i18next'])
 
 app.service('plex',             require('./services/plex'))
+app.service('jellyfin',         require('./services/jellyfin'))
 app.service('dizquetv',         require('./services/dizquetv'))
 app.service('resolutionOptions', require('./services/resolution-options'))
 app.service('getShowData', require('./services/get-show-data'))
 app.service('commonProgramTools', require('./services/common-program-tools'))
+app.service('libraryCatalogPreload', require('./services/library-catalog-preload'))
+
+// Warm content-sources + add-programming catalogs in the background on first app visit.
+// Live Plex/Jellyfin is only used by Library Management sync (preferLive).
+// Invalidated on library resync / cache delete. Custom shows always live.
+// Sections show their own loading indicators until ready; Done/Update stays disabled until then.
+app.run(['libraryCatalogPreload', '$timeout', function (libraryCatalogPreload, $timeout) {
+    $timeout(function () {
+        libraryCatalogPreload.ensureLoaded().catch(function (err) {
+            console.error('Initial library catalog preload failed', err);
+        });
+    }, 0);
+}]);
 
 app.directive('plexSettings',   require('./directives/plex-settings'))
+app.directive('jellyfinSettings', require('./directives/jellyfin-settings'))
+app.directive('traktSettings',  require('./directives/trakt-settings'))
+app.directive('jellyfinServerEdit', require('./directives/jellyfin-server-edit'))
 app.directive('ffmpegSettings', require('./directives/ffmpeg-settings'))
 app.directive('xmltvSettings',  require('./directives/xmltv-settings'))
 app.directive('hdhrSettings',   require('./directives/hdhr-settings'))
 app.directive('imagemagickSettings', require('./directives/imagemagick-settings'))
+app.directive('configTransfer', require('./directives/config-transfer'))
 app.directive('plexLibrary',    require('./directives/plex-library'))
 app.directive('programConfig',  require('./directives/program-config'))
 app.directive('flexConfig',  require('./directives/flex-config'))
@@ -68,6 +86,7 @@ app.controller('guideCtrl',  require('./controllers/guide'))
 app.controller('playerCtrl',  require('./controllers/player'))
 app.controller('fillerCtrl',  require('./controllers/filler'))
 app.controller('customShowsCtrl',  require('./controllers/custom-shows'))
+app.controller('listsCtrl',  require('./controllers/lists'))
 
 app.config(function ($routeProvider) {
     $routeProvider
@@ -86,6 +105,10 @@ app.config(function ($routeProvider) {
     .when("/custom-shows", {
         templateUrl: "views/custom-shows.html",
         controller: 'customShowsCtrl'
+    })
+    .when("/lists", {
+        templateUrl: "views/lists.html",
+        controller: 'listsCtrl'
     })
     .when("/library", {
         templateUrl: "views/library.html",

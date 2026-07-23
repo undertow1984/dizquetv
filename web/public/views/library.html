@@ -38,11 +38,22 @@
                 <div class="card-body">
                   <h5 class="card-title"><a href="" class="card-link" ng-click="openManagement(); $event.preventDefault()">Management...</a></h5>
         
-                  <p class="card-text">Enable libraries, sync Plex content to a local cache, and see last full sync times. Cached data is used across the app so channel tools avoid repeated Plex API scans.</p>
+                  <p class="card-text">Enable libraries, sync Plex and Jellyfin content to a local cache, and see last full sync times. Cached data is used across the app so channel tools avoid repeated media-server API scans.</p>
                   
                 </div>
             </div>
        
+        </div>
+        <div class='col-md-auto'>
+            <div class="card" style="width: 18rem;">
+                <div class="card-body">
+                  <h5 class="card-title"><a href="#!/lists" class="card-link">Lists...</a></h5>
+                  <p class="card-text">
+                    Track Letterboxd and Trakt movie lists, match them to your library cache, and refresh anytime
+                    (similar to Radarr/Sonarr list sync). Optionally keep a channel updated from each list.
+                  </p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -52,20 +63,21 @@
             <div class="modal-dialog modal-dialog-scrollable modal-lg" role="document">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title">Plex Library Management</h5>
+                        <h5 class="modal-title">Library Management (Plex + Jellyfin)</h5>
                     </div>
                     <div class="modal-body">
                         <p class="small text-muted mb-2">
                             Toggle libraries on or off, and sync movies / shows / collections / playlists into a
                             <strong>local cache</strong>. After the first full sync, later syncs only process
                             adds, updates, and deletes. Disabled libraries are hidden from programming tools.
+                            Mark <strong>Contains filler</strong> on libraries that should appear when adding filler clips.
                         </p>
 
                         <!-- Auto re-sync interval -->
-                        <div class="form-row align-items-end mb-3 border rounded p-2 bg-light">
-                            <div class="col-md-6">
-                                <label class="small mb-0" for="autoSyncHours">Re-sync automatically every</label>
-                                <div class="input-group input-group-sm">
+                        <div class="mb-3 border rounded p-2 bg-light library-autosync-box">
+                            <div class="d-flex align-items-center flex-wrap library-autosync-row">
+                                <label class="small mb-0 library-autosync-label" for="autoSyncHours">Plex re-sync every</label>
+                                <div class="input-group input-group-sm library-autosync-input">
                                     <input id="autoSyncHours" type="number" min="0" max="168" step="1"
                                         class="form-control"
                                         ng-model="autoSyncHours"
@@ -73,25 +85,38 @@
                                     <div class="input-group-append">
                                         <span class="input-group-text">hours</span>
                                     </div>
-                                    <div class="input-group-append">
-                                        <button type="button" class="btn btn-outline-primary"
-                                            ng-click="saveAutoSyncHours()"
-                                            ng-disabled="managementLoading || managementSaving || syncBusy">
-                                            Save
-                                        </button>
-                                    </div>
                                 </div>
-                                <small class="form-text text-muted">Use <strong>0</strong> to disable automatic re-sync.</small>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="small text-muted">
-                                    Last full-app sync:
+                                <div class="small text-muted library-autosync-stamp">
+                                    Last Plex sync:
                                     <strong ng-if="lastGlobalSyncAt">{{ formatSyncTime(lastGlobalSyncAt) }}</strong>
                                     <strong ng-if="!lastGlobalSyncAt">Never</strong>
                                 </div>
-                                <div class="small text-muted" ng-if="syncingKeys.length">
-                                    Syncing: {{ syncingKeys.join(', ') }}
+                            </div>
+                            <div class="d-flex align-items-center flex-wrap library-autosync-row mt-2">
+                                <label class="small mb-0 library-autosync-label" for="jfAutoSyncHours">Jellyfin re-sync every</label>
+                                <div class="input-group input-group-sm library-autosync-input">
+                                    <input id="jfAutoSyncHours" type="number" min="0" max="168" step="1"
+                                        class="form-control"
+                                        ng-model="jellyfinAutoSyncHours"
+                                        ng-disabled="managementLoading || managementSaving || syncBusy" />
+                                    <div class="input-group-append">
+                                        <span class="input-group-text">hours</span>
+                                    </div>
                                 </div>
+                                <div class="small text-muted library-autosync-stamp flex-grow-1">
+                                    Last Jellyfin sync:
+                                    <strong ng-if="jellyfinLastGlobalSyncAt">{{ formatSyncTime(jellyfinLastGlobalSyncAt) }}</strong>
+                                    <strong ng-if="!jellyfinLastGlobalSyncAt">Never</strong>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-primary library-autosync-save"
+                                    ng-click="saveAutoSyncHours()"
+                                    ng-disabled="managementLoading || managementSaving || syncBusy">
+                                    Save
+                                </button>
+                            </div>
+                            <small class="form-text text-muted mb-0 mt-2">Use <strong>0</strong> to disable automatic re-sync.</small>
+                            <div class="small text-muted mt-1" ng-if="syncingKeys.length">
+                                Syncing: {{ syncingKeys.join(', ') }}
                             </div>
                         </div>
 
@@ -138,7 +163,7 @@
 
                         <div class="list-group" ng-show="!managementLoading && managementLibraries.length &gt; 0">
                             <div class="list-group-item"
-                                ng-repeat="lib in managementLibraries track by (lib.serverName + '-' + lib.sectionKey)">
+                                ng-repeat="lib in managementLibraries track by (lib.source + '-' + lib.serverName + '-' + lib.sectionKey)">
                                 <div class="d-flex align-items-center">
                                     <div class="custom-control custom-switch mr-3">
                                         <input type="checkbox"
@@ -151,10 +176,35 @@
                                     </div>
                                     <div class="flex-grow-1">
                                         <strong>{{ lib.title }}</strong>
+                                        <span class="badge badge-primary text-capitalize ml-1">{{ lib.source || 'plex' }}</span>
                                         <span class="badge badge-secondary text-capitalize ml-1">{{ lib.type }}</span>
+                                        <span class="badge badge-warning ml-1" ng-if="lib.containsFiller">Filler</span>
+                                        <span class="badge badge-dark ml-1" ng-if="lib.hideContent">Hidden</span>
                                         <span class="badge badge-info ml-1" ng-if="lib.itemCount != null">{{ lib.itemCount }} items</span>
                                         <span class="badge badge-info ml-1" ng-if="lib.collectionCount != null && lib.collectionCount > 0">{{ lib.collectionCount }} collections</span>
                                         <div class="small text-muted">{{ lib.serverName }} · section {{ lib.sectionKey }}</div>
+                                        <div class="form-check mt-1 mb-0">
+                                            <input class="form-check-input" type="checkbox"
+                                                id="lib-filler-{{$index}}"
+                                                ng-model="lib.containsFiller"
+                                                ng-change="toggleContainsFiller(lib)"
+                                                ng-disabled="managementSaving || syncBusy || !lib.enabled" />
+                                            <label class="form-check-label small" for="lib-filler-{{$index}}">
+                                                Contains filler
+                                            </label>
+                                            <span class="text-muted small ml-1">(only these appear when adding filler)</span>
+                                        </div>
+                                        <div class="form-check mt-1 mb-0">
+                                            <input class="form-check-input" type="checkbox"
+                                                id="lib-hide-{{$index}}"
+                                                ng-model="lib.hideContent"
+                                                ng-change="toggleHideContent(lib)"
+                                                ng-disabled="managementSaving || syncBusy || !lib.enabled" />
+                                            <label class="form-check-label small" for="lib-hide-{{$index}}">
+                                                Hide content
+                                            </label>
+                                            <span class="text-muted small ml-1">(hidden from programming; still shown in Add Filler if “Contains filler” is on)</span>
+                                        </div>
                                         <div class="small" ng-if="lib.enabled">
                                             <span class="text-muted">Last full sync: </span>
                                             <strong ng-if="lib.lastFullSyncAt">{{ formatSyncTime(lib.lastFullSyncAt) }}</strong>
@@ -213,7 +263,7 @@
                             </div>
                         </div>
                         <div class="text-muted small" ng-show="!managementLoading && managementLibraries.length === 0 && !managementError">
-                            No movie/TV/music libraries found on your Plex servers.
+                            No movie/TV/music libraries found on your Plex or Jellyfin servers.
                         </div>
                     </div>
                     <div class="modal-footer">

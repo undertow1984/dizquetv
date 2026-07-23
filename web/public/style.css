@@ -11,9 +11,144 @@
 
 .pull-right { float: right; }
 
+/*
+ * Modal widths: ~30% wider than Bootstrap 4.4 defaults.
+ * Bootstrap: sm 300, default 500, lg 800, xl 1140 → 390 / 650 / 1040 / 1482
+ */
+@media (min-width: 576px) {
+  .modal-dialog {
+    max-width: 650px;
+  }
+  .modal-dialog.modal-sm {
+    max-width: 390px;
+  }
+}
+@media (min-width: 992px) {
+  .modal-dialog.modal-lg,
+  .modal-dialog.modal-xl {
+    max-width: 1040px;
+  }
+}
+@media (min-width: 1200px) {
+  .modal-dialog.modal-xl {
+    max-width: min(1482px, 98vw);
+  }
+}
+/* Default / small viewports: still allow almost full width when needed */
+.modal-dialog {
+  width: auto;
+}
+
 .modal-semi-body {
   padding: 1rem;
   flex: 1 1 auto;
+}
+
+/* Channel editor: keep modal within the viewport; long programming lists scroll inside */
+.modal-dialog.channel-editor-dialog {
+  max-height: calc(100vh - 1rem);
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  display: flex;
+}
+.modal-dialog.channel-editor-dialog .modal-content {
+  max-height: calc(100vh - 1rem);
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+/* Wrapper around header/body/footer after boot — must be a flex column so the footer stays visible */
+.modal-dialog.channel-editor-dialog .modal-content > .channel-editor-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-dialog.channel-editor-dialog .modal-content > .channel-editor-body.ng-hide {
+  display: none !important;
+}
+.modal-dialog.channel-editor-dialog .modal-header,
+.modal-dialog.channel-editor-dialog .modal-footer,
+.modal-dialog.channel-editor-dialog .channel-editor-body > .modal-header,
+.modal-dialog.channel-editor-dialog .channel-editor-body > .modal-footer {
+  flex: 0 0 auto;
+}
+.modal-dialog.channel-editor-dialog .modal-body,
+.modal-dialog.channel-editor-dialog .channel-editor-body > .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Programming tab: toolbar fixed; program list + tools fill remaining space above footer */
+.modal-dialog.channel-editor-dialog.channel-editor-programming .modal-body.programming-tab-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.modal-dialog.channel-editor-dialog .programming-toolbar {
+  flex: 0 0 auto;
+  padding: 1rem 1rem 0.5rem;
+}
+.modal-dialog.channel-editor-dialog .programming-toolbar.modal-semi-body {
+  flex: 0 0 auto;
+  padding: 0.75rem 1rem 0.5rem;
+}
+.modal-dialog.channel-editor-dialog .programming-panes {
+  flex: 1 1 auto;
+  min-height: 8rem;
+  /* Prefer flex fill over large fixed rem heights that push the footer off-screen */
+  height: auto !important;
+  max-height: none !important;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-left: 0;
+  padding-right: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.modal-dialog.channel-editor-dialog .programming-panes-row {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  margin-left: 0;
+  margin-right: 0;
+  overflow: hidden;
+  height: 100%;
+}
+.modal-dialog.channel-editor-dialog .programming-pane {
+  max-height: 100% !important;
+  height: 100%;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+}
+/* Keep Cancel / Add-Update Channel always visible at the bottom of the modal */
+.modal-dialog.channel-editor-dialog .channel-editor-body > .modal-footer.channel-editor-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  border-top: 1px solid #dee2e6;
+  background: #fff;
+  z-index: 5;
+}
+.modal-dialog.channel-editor-dialog .channel-editor-footer-msgs {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+.modal-dialog.channel-editor-dialog .channel-editor-footer-actions {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .plex-panel {
@@ -295,8 +430,9 @@ div.programming-programs div.list-group-item {
   height: 1.5rem;
 }
 .channel-editor-modal-big {
-  width:1200px;
+  width: min(1560px, 98vw); /* 1200px + 30% */
   min-width: 98%;
+  max-width: min(1560px, 98vw);
 }
 
 /* Safari */
@@ -353,13 +489,84 @@ div.programming-programs div.list-group-item {
   background : rgba(255,255,255, 0.1);
 }
 
+/* Lists page: block UI while save / refresh / match is running */
+.lists-section {
+  position: relative;
+  min-height: 10rem;
+}
+.lists-busy-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 50;
+  background: rgba(255, 255, 255, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: wait;
+  pointer-events: all;
+}
+.lists-busy-inner {
+  text-align: center;
+  padding: 1rem 1.5rem;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 0.25rem;
+  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.08);
+  max-width: 24rem;
+}
+.lists-busy-inner .loader {
+  width: 2rem;
+  height: 2rem;
+  border-width: 0.25em;
+  margin: 0 auto 0.75rem;
+  display: block;
+}
+.lists-busy-status {
+  font-size: 0.875rem;
+  color: #333;
+  line-height: 1.35;
+}
+
+/* Toast stack: bottom-left so it stays out of the main work area */
+.dizque-toast-stack {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  z-index: 1000000;
+  pointer-events: none;
+}
+.dizque-toast-stack .dizque-toast {
+  pointer-events: auto;
+}
+
 .dizque-toast {
-  margin-top: 0.2rem;
-  padding: 0.5rem;
+  margin-top: 0.25rem;
+  padding: 0.35rem 0.5rem;
   background: #FFFFFF;
   border: 1px solid rgba(0,0,0,.1);
-  border-radius: .25rem;
+  border-radius: .2rem;
   color: #FFFFFF;
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+.dizque-toast strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+.dizque-toast-text {
+  font-size: 0.78rem;
+  margin-top: 0.1rem;
+}
+.dizque-toast-close {
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+  margin: 0;
 }
 
 .dizque-toast.bg-warning {
@@ -394,4 +601,88 @@ div.programming-programs div.list-group-item {
 
 .list-group-item .library-item-hover:hover {
   background: #D0D0FF
+}
+
+/* Embedded library browser inside Create Custom Show */
+.plex-library-embedded .plex-library-embed-panel {
+  background: #f8f9fa;
+}
+.plex-library-embedded .library-content-stage {
+  min-height: 6rem;
+}
+
+/* Smooth filter transitions (Add Programming + Content Sources) */
+.library-content-stage,
+.content-sources-stage {
+  position: relative;
+  min-height: 8rem;
+}
+.library-content-loading,
+.content-sources-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 8rem;
+  padding: 1.5rem 1rem;
+  color: #6c757d;
+  font-size: 0.9rem;
+}
+.library-content-stage.is-loading .library-content-panels,
+.content-sources-stage.is-loading .content-sources-panels {
+  opacity: 0;
+  pointer-events: none;
+}
+.library-content-panels,
+.content-sources-panels {
+  opacity: 1;
+  transition: opacity 0.18s ease-in-out;
+}
+.library-content-stage.is-ready .library-content-panels {
+  opacity: 1;
+}
+
+/* Channel editor: full-modal boot loading */
+.channel-editor-boot {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+}
+.channel-editor-boot-inner {
+  max-width: 28rem;
+}
+.channel-editor-boot .loader {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 3px solid #dee2e6;
+  border-top-color: #007bff;
+  border-radius: 50%;
+  animation: channel-editor-spin 0.8s linear infinite;
+}
+@keyframes channel-editor-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Library Management — auto re-sync controls */
+.library-autosync-box .library-autosync-row {
+  min-height: 2rem;
+}
+.library-autosync-box .library-autosync-label {
+  flex: 0 0 11.5rem;
+  max-width: 11.5rem;
+}
+.library-autosync-box .library-autosync-input {
+  flex: 0 0 9.5rem;
+  width: 9.5rem;
+  max-width: 9.5rem;
+}
+.library-autosync-box .library-autosync-stamp {
+  margin-left: 0.75rem;
+  white-space: nowrap;
+}
+.library-autosync-box .library-autosync-save {
+  margin-left: 0.75rem;
+  flex: 0 0 auto;
 }

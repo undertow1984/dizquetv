@@ -104,5 +104,12 @@
             </div>
         </div>
     </div>
-    <plex-library limit=1000000000 height="300" visible="showPlexLibrary" on-finish="importPrograms"></plex-library>
+    <plex-library
+        limit="1000000000"
+        height="300"
+        visible="showPlexLibrary"
+        filler-only="true"
+        hide-custom="true"
+        on-finish="importPrograms">
+    </plex-library>
 </div>

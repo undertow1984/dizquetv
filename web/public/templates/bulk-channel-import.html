@@ -7,106 +7,100 @@
                 </div>
                 <div class="modal-body">
                     <p class="small text-muted">
-                        Select Plex playlists, collections, and/or TV shows. Each item maps to a channel with the same name.
+                        Select Plex/Jellyfin playlists &amp; collections, TV shows, and custom programming
+                        (same content resources as channel Properties).
                         If that channel already exists, its programming is <strong>updated</strong> (duplicates removed, order randomized)
                         instead of creating a new channel. Content sources are saved on the channel for later re-sync.
-                        If multiple sources share a name, both are imported into that one channel.
                     </p>
 
-                    <div ng-show="servers.length === 0 && !loading" class="text-info">
-                        Configure a Plex server in <a href="/#!/settings#plex">Settings</a> first.
+                    <div class="form-group">
+                        <label class="small mb-1" for="bulk-import-channel-name">Name</label>
+                        <input id="bulk-import-channel-name"
+                            type="text"
+                            class="form-control form-control-sm"
+                            placeholder="Channel name (optional)"
+                            ng-model="channelName"
+                            ng-disabled="loading || importing"
+                            autocomplete="off" />
+                        <small class="form-text text-muted">
+                            Leave empty to name each channel after its content source.
+                            If set, that name is used (all selected sources import into that one channel).
+                            For Letterboxd/Trakt tracked lists, use <a href="#!/lists">Library → Lists</a>.
+                        </small>
+                    </div>
+
+                    <div ng-show="servers.length === 0 && customShows.length === 0 && !loading" class="text-info">
+                        Configure a Plex or Jellyfin server in
+                        <a href="/#!/settings">Settings</a>, or create custom shows under
+                        <a href="/#!/library">Library</a> first.
                     </div>
 
                     <div class="form-group" ng-show="servers.length &gt; 0">
-                        <label class="small" for="bulk-import-server">Plex Server</label>
-                        <select id="bulk-import-server"
-                            class="form-control form-control-sm"
-                            ng-model="selectedServerName"
-                            ng-options="s.name as s.name for s in servers"
-                            ng-change="loadLists()"
-                            ng-disabled="loading || importing">
-                        </select>
+                        <label class="small d-block">Media source</label>
+                        <div class="btn-group btn-group-sm mb-2" role="group" aria-label="Media source filter">
+                            <button type="button" class="btn"
+                                ng-class="mediaSourceFilter === 'all' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-click="setMediaSourceFilter('all')"
+                                ng-disabled="loading || importing">All</button>
+                            <button type="button" class="btn"
+                                ng-class="mediaSourceFilter === 'plex' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-click="setMediaSourceFilter('plex')"
+                                ng-disabled="loading || importing">Plex</button>
+                            <button type="button" class="btn"
+                                ng-class="mediaSourceFilter === 'jellyfin' ? 'btn-primary' : 'btn-outline-primary'"
+                                ng-click="setMediaSourceFilter('jellyfin')"
+                                ng-disabled="loading || importing">Jellyfin</button>
+                        </div>
+                        <small class="form-text text-muted">
+                            Same catalog as channel Content Sources: playlists &amp; collections, TV shows, and custom programming.
+                        </small>
                     </div>
 
                     <div class="loader" ng-show="loading"></div>
 
-                    <div class="row" ng-show="!loading && servers.length &gt; 0">
+                    <div class="row" ng-show="!loading && (servers.length &gt; 0 || customShows.length &gt; 0)">
                         <div class="col-md-4">
                             <div class="card mb-3">
                                 <div class="card-header flex-container" style="align-items: center;">
-                                    <strong>Playlists</strong>
+                                    <strong>Playlists &amp; Collections</strong>
                                     <span class="flex-pull-right small">
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(playlists, true)" ng-disabled="importing || playlists.length === 0">Select all</button>
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(playlists, false)" ng-disabled="importing || playlists.length === 0">None</button>
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, true)" ng-disabled="importing || lists.length === 0">Select all</button>
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(lists, false)" ng-disabled="importing || lists.length === 0">None</button>
                                     </span>
                                 </div>
                                 <div class="px-2 py-2 border-bottom">
                                     <input type="search"
                                         class="form-control form-control-sm"
-                                        placeholder="Search playlists..."
-                                        ng-model="playlistFilter"
+                                        placeholder="Search playlists &amp; collections..."
+                                        ng-model="listFilter"
                                         ng-model-options="{ debounce: 100 }"
                                         ng-disabled="importing"
                                         autocomplete="off" />
                                 </div>
                                 <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
-                                    <div ng-show="playlists.length === 0" class="p-3 text-muted small">No video/audio playlists found.</div>
-                                    <div ng-show="playlists.length &gt; 0 && (playlists | filter:playlistFilter).length === 0"
-                                        class="p-3 text-muted small">No playlists match your search.</div>
+                                    <div ng-show="lists.length === 0" class="p-3 text-muted small">No playlists or collections found.</div>
+                                    <div ng-show="lists.length &gt; 0 && (lists | filter:listFilter).length === 0"
+                                        class="p-3 text-muted small">No playlists or collections match your search.</div>
                                     <div class="list-group list-group-flush">
                                         <label class="list-group-item list-group-item-action mb-0"
                                             style="cursor: pointer;"
-                                            ng-repeat="p in playlists | filter:playlistFilter track by p.key">
+                                            ng-repeat="p in lists | filter:listFilter track by ((p.mediaSource || 'plex') + '-' + p.type + '-' + p.serverName + '-' + p.key + '-' + (p.libraryTitle || ''))">
                                             <input type="checkbox"
                                                 ng-model="p.selected"
                                                 ng-disabled="importing"
                                                 style="margin-right: 0.5rem;" />
+                                            <span class="badge badge-secondary text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.mediaSource">{{ p.mediaSource }}</span>
+                                            <span class="badge badge-light border text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="p.type">{{ p.type }}</span>
                                             {{ p.title }}<span ng-if="p.count !== null && p.count !== undefined"> ({{ p.count }})</span>
+                                            <span class="text-muted small" ng-if="p.libraryTitle"> — {{ p.libraryTitle }}</span>
+                                            <span class="text-muted small" ng-if="p.serverName"> ({{ p.serverName }})</span>
                                         </label>
                                     </div>
                                 </div>
                                 <div class="card-footer small text-muted">
-                                    {{ selectedCount(playlists) }} selected
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-4">
-                            <div class="card mb-3">
-                                <div class="card-header flex-container" style="align-items: center;">
-                                    <strong>Collections</strong>
-                                    <span class="flex-pull-right small">
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(collections, true)" ng-disabled="importing || collections.length === 0">Select all</button>
-                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(collections, false)" ng-disabled="importing || collections.length === 0">None</button>
-                                    </span>
-                                </div>
-                                <div class="px-2 py-2 border-bottom">
-                                    <input type="search"
-                                        class="form-control form-control-sm"
-                                        placeholder="Search collections..."
-                                        ng-model="collectionFilter"
-                                        ng-model-options="{ debounce: 100 }"
-                                        ng-disabled="importing"
-                                        autocomplete="off" />
-                                </div>
-                                <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
-                                    <div ng-show="collections.length === 0" class="p-3 text-muted small">No collections found.</div>
-                                    <div ng-show="collections.length &gt; 0 && (collections | filter:collectionFilter).length === 0"
-                                        class="p-3 text-muted small">No collections match your search.</div>
-                                    <div class="list-group list-group-flush">
-                                        <label class="list-group-item list-group-item-action mb-0"
-                                            style="cursor: pointer;"
-                                            ng-repeat="c in collections | filter:collectionFilter track by (c.key + '-' + c.libraryTitle)">
-                                            <input type="checkbox"
-                                                ng-model="c.selected"
-                                                ng-disabled="importing"
-                                                style="margin-right: 0.5rem;" />
-                                            {{ c.title }}<span ng-if="c.count !== null && c.count !== undefined"> ({{ c.count }})</span>
-                                            <span class="text-muted small" ng-show="c.libraryTitle"> — {{ c.libraryTitle }}</span>
-                                        </label>
-                                    </div>
-                                </div>
-                                <div class="card-footer small text-muted">
-                                    {{ selectedCount(collections) }} selected
+                                    {{ selectedCount(lists) }} selected · {{ lists.length }} total
                                 </div>
                             </div>
                         </div>
@@ -135,39 +129,83 @@
                                     <div class="list-group list-group-flush">
                                         <label class="list-group-item list-group-item-action mb-0"
                                             style="cursor: pointer;"
-                                            ng-repeat="s in shows | filter:showFilter track by (s.key + '-' + (s.libraryTitle || ''))">
+                                            ng-repeat="s in shows | filter:showFilter track by ((s.mediaSource || 'plex') + '-' + s.serverName + '-' + s.key + '-' + (s.libraryTitle || ''))">
                                             <input type="checkbox"
                                                 ng-model="s.selected"
                                                 ng-disabled="importing"
                                                 style="margin-right: 0.5rem;" />
+                                            <span class="badge badge-secondary text-uppercase" style="font-size: 0.65rem;"
+                                                ng-if="s.mediaSource">{{ s.mediaSource }}</span>
                                             {{ s.title }}<span ng-if="s.seasonCount != null && s.episodeCount != null"> (S{{ s.seasonCount }} E{{ s.episodeCount }})</span><span ng-if="(s.seasonCount == null || s.episodeCount == null) && s.count !== null && s.count !== undefined"> ({{ s.count }})</span>
                                             <span class="text-muted small" ng-show="s.libraryTitle"> — {{ s.libraryTitle }}</span>
+                                            <span class="text-muted small" ng-if="s.serverName"> ({{ s.serverName }})</span>
                                         </label>
                                     </div>
                                 </div>
                                 <div class="card-footer small text-muted">
-                                    {{ selectedCount(shows) }} selected
+                                    {{ selectedCount(shows) }} selected · {{ shows.length }} total
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card mb-3">
+                                <div class="card-header flex-container" style="align-items: center;">
+                                    <strong>Custom Programming</strong>
+                                    <span class="flex-pull-right small">
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(customShows, true)" ng-disabled="importing || customShows.length === 0">Select all</button>
+                                        <button type="button" class="btn btn-sm btn-link" ng-click="selectAll(customShows, false)" ng-disabled="importing || customShows.length === 0">None</button>
+                                    </span>
+                                </div>
+                                <div class="px-2 py-2 border-bottom">
+                                    <input type="search"
+                                        class="form-control form-control-sm"
+                                        placeholder="Search custom programming..."
+                                        ng-model="customFilter"
+                                        ng-model-options="{ debounce: 100 }"
+                                        ng-disabled="importing"
+                                        autocomplete="off" />
+                                </div>
+                                <div class="card-body p-0" style="max-height: 320px; overflow-y: auto;">
+                                    <div ng-show="customShows.length === 0" class="p-3 text-muted small">No custom programming found. Create custom shows under Library → Custom Shows.</div>
+                                    <div ng-show="customShows.length &gt; 0 && (customShows | filter:customFilter).length === 0"
+                                        class="p-3 text-muted small">No custom programming matches your search.</div>
+                                    <div class="list-group list-group-flush">
+                                        <label class="list-group-item list-group-item-action mb-0"
+                                            style="cursor: pointer;"
+                                            ng-repeat="c in customShows | filter:customFilter track by c.key">
+                                            <input type="checkbox"
+                                                ng-model="c.selected"
+                                                ng-disabled="importing"
+                                                style="margin-right: 0.5rem;" />
+                                            <span class="badge badge-info text-uppercase" style="font-size: 0.65rem;">custom</span>
+                                            {{ c.title }}<span ng-if="c.count !== null && c.count !== undefined"> ({{ c.count }})</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="card-footer small text-muted">
+                                    {{ selectedCount(customShows) }} selected · {{ customShows.length }} total
                                 </div>
                             </div>
                         </div>
                     </div>
 
                     <div class="text-info small" ng-show="status">{{ status }}</div>
-                    <div class="progress mb-2" ng-show="importing || progress.total &gt; 0" style="height: 8px;">
-                        <div class="progress-bar"
+                    <div class="progress mb-2" ng-show="importing && progress.total &gt; 0">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated"
                             role="progressbar"
-                            ng-style="{ width: (progress.total ? (100 * progress.current / progress.total) : 0) + '%' }">
+                            ng-style="{ width: ((progress.current / progress.total) * 100) + '%' }">
+                            {{ progress.current }} / {{ progress.total }}
                         </div>
                     </div>
                     <div class="text-danger small" ng-repeat="e in errors track by $index">{{ e }}</div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-sm btn-link" ng-click="cancel()" ng-disabled="importing">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-secondary" ng-click="cancel()" ng-disabled="importing">Cancel</button>
                     <button type="button" class="btn btn-sm btn-primary"
                         ng-click="importSelected()"
-                        ng-disabled="importing || loading || servers.length === 0 || (selectedCount(playlists) + selectedCount(collections) + selectedCount(shows) === 0)">
+                        ng-disabled="loading || importing || (selectedCount(lists) + selectedCount(shows) + selectedCount(customShows)) === 0">
                         <span class="fa fa-spinner fa-spin" ng-show="importing"></span>
-                        Import {{ selectedCount(playlists) + selectedCount(collections) + selectedCount(shows) || '' }} Channel(s)
+                        Import selected
                     </button>
                 </div>
             </div>

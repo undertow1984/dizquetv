@@ -16,6 +16,11 @@
             </span>
         </li>
         <li class="nav-item">
+            <span class="nav-link btn btn-link {{ selected === 'jellyfin' ? 'active' : ''}}" ng-click="selected = 'jellyfin'">
+                Jellyfin
+            </span>
+        </li>
+        <li class="nav-item">
             <span class="nav-link btn btn-link {{ selected === 'hdhr' ? 'active' : ''}}" ng-click="selected = 'hdhr'">
                 HDHR
             </span>
@@ -25,11 +30,24 @@
                 ImageMagick
             </span>
         </li>
+        <li class="nav-item">
+            <span class="nav-link btn btn-link {{ selected === 'trakt' ? 'active' : ''}}" ng-click="selected = 'trakt'">
+                Trakt
+            </span>
+        </li>
+        <li class="nav-item">
+            <span class="nav-link btn btn-link {{ selected === 'backup' ? 'active' : ''}}" ng-click="selected = 'backup'">
+                Backup
+            </span>
+        </li>
     </ul>
     <br ></br>
     <plex-settings ng-if="selected == 'plex'"></plex-settings>
+    <jellyfin-settings ng-if="selected == 'jellyfin'"></jellyfin-settings>
+    <trakt-settings ng-if="selected == 'trakt'"></trakt-settings>
     <ffmpeg-settings ng-if="selected == 'ffmpeg'"></ffmpeg-settings>
     <xmltv-settings ng-if="selected == 'xmltv'"></xmltv-settings>
     <hdhr-settings ng-if="selected == 'hdhr'"></hdhr-settings>
     <imagemagick-settings ng-if="selected == 'imagemagick'"></imagemagick-settings>
+    <config-transfer ng-if="selected == 'backup'"></config-transfer>
 </div>
